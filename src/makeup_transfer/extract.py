@@ -155,7 +155,7 @@ def extract_look(
 
     Returns ``(layer_rgba, skin_lab_mean, debug)`` (also persisted via the store).
     """
-    import json
+    from .apply import DEFAULT_REGION_PARAMS
 
     _, uv_m, vis_m = unwrap_to_uv(with_image, uv_size)
     _, uv_b, vis_b = unwrap_to_uv(without_image, uv_size)
@@ -168,8 +168,11 @@ def extract_look(
         meta={
             "source_with": str(with_image),
             "source_without": str(without_image),
-            "blend": "lab-delta",
-            "notes": json.dumps({"skin_lab_mean": [round(float(v), 2) for v in skin_lab]}),
+            "blend": "per-region",
+            "blend_params": {
+                "skin_lab_mean": [round(float(v), 2) for v in skin_lab],
+                "regions": {k: dict(v) for k, v in DEFAULT_REGION_PARAMS.items()},
+            },
         },
     )
     debug["uv_with"] = uv_m
@@ -222,12 +225,11 @@ def _main() -> None:
     cv2.imwrite(str(out / f"{args.look}_layer_preview.png"), _checker_preview(layer))
 
     if args.apply_to:
-        from .phase0_spike import apply_layer  # Phase 2 replaces this with apply.py
+        from .apply import apply_look
 
-        face_t = detect_face(args.apply_to)
-        result = apply_layer(face_t.image, face_t.landmarks, layer, skin_lab)
+        result, dbg = apply_look(args.look, args.apply_to, uv_size=args.size)
         cv2.imwrite(str(out / f"{args.look}_result.png"), result)
-        side = np.hstack([face_t.image, result])
+        side = np.hstack([dbg["target"], result])
         cv2.imwrite(str(out / f"{args.look}_side_by_side.png"), side)
         print(f"Applied to {args.apply_to} -> {out / f'{args.look}_result.png'}")
 

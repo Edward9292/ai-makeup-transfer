@@ -47,6 +47,11 @@ class LookMeta:
     source_with: str | None = None      # filename/path of the with-makeup source
     source_without: str | None = None   # filename/path of the without-makeup source
     blend: str = "multiply"             # how the layer should be composited onto a target
+    # Per-region blend recipe used by apply.py, e.g.
+    #   {"skin_lab_mean": [L, a, b],
+    #    "regions": {"lips": {"mode": "multiply", "strength": 1.0}, ...}}
+    # Empty dict -> apply.py falls back to its defaults (keeps old looks loadable).
+    blend_params: dict = field(default_factory=dict)
     notes: str = ""
 
     def to_dict(self) -> dict:

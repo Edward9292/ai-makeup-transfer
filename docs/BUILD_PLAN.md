@@ -202,9 +202,43 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
   - **NEXT:** Phase 2 `apply.py` (per-region blend modes, refiner) — or first evaluate
     makeup-priors PCA fitting as the extraction upgrade.
 
+- **2026-07-02 — Phase 2 application pipeline working (`apply.py`).**
+  - `apply.py` — per-region, skin-tone-aware blend as planned: look's UV layer blended over the
+    target's UV texture, re-projected, composited. All effects are relative to the **source's
+    bare-skin mean** (`skin_lab_mean`), so the target keeps its own luminance base/texture.
+  - **Per-region blend modes** (soft, normalized region weights in canonical UV — lips / brows /
+    eye band / skin): `multiply` = absorptive (target L scaled by the layer's transmittance
+    `L_layer/L_srcskin`, alpha as Beer-Lambert optical depth, floor 0.15; gloss brightening added
+    on top), `softlight` = scattering powder (W3C soft-light on L, self-damps at extremes),
+    `additive` = specular/glitter (brightening only, chroma pulled half-weight). Recipe lives in
+    `meta.json` (`blend_params.regions`, new `LookMeta.blend_params` field, old looks still load
+    via the notes-JSON fallback); `--strength region=x` overrides at apply time.
+  - **Harmonization (classical):** default `composite="delta"` — only the makeup *change*
+    (blended − target UV texture, both through the same image→UV→image round trip) is projected
+    and added to the untouched photo, cancelling double-resample blur. Full-res skin grain and
+    lip specular survive under the pigment; visibly crisper than the naive alpha-over (`plain`,
+    kept for comparison). extract.py `--apply-to` now routes through `apply.py`.
+  - **Verified: 3 looks × 4 targets** (3 FFHQ identities + MT-dataset sample;
+    `preprocess_out/phase2/verification_grid.png` + `matrix/`): lipstick (red, bold red, magenta),
+    brow fill and eye shadow transfer across pale/freckled/olive/male targets; identity preserved,
+    teeth clean on open smiles, no smearing into eyes/glasses.
+  - **NN-refiner verdict: deferred.** With the delta composite there are no visible seam/grain
+    artifacts left for a U-Net to fix on these samples; remaining gaps (eyeshadow subtler than
+    source, no physical gloss/glitter re-rendering) are extraction-side, not composite-side. A
+    refiner trained on 3 identities would likely overfit. Revisit after more FFHQ-Makeup data
+    and/or the makeup-priors upgrade.
+  - Known limitations: local test targets span light-to-olive skin tones only (FFHQ/MT samples) —
+    verify on darker skin once more data is pulled; `additive` mode implemented but no look uses
+    it yet (no glitter sample extracted).
+  - **NEXT:** Phase 2.5 (single-image extraction via removal → pseudo-pair) or Phase 3
+    (Gradio demo + save/load, per-region sliders are already free via `--strength`); or evaluate
+    makeup-priors PCA fitting as the extraction upgrade.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
-  img2img "enhance".
+  img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain
+  artifact class the refiner was budgeted for; revisit only if extraction upgrades expose
+  composite-side artifacts.
 - makeup-priors: PCA prior (fast, low-freq) vs StyleGAN2 prior (high-freq, heavier) — start PCA.
 - UV upgrade path if quality bottlenecks: FreeUV vs DECA vs 3DDFA_V2 (native build was
   sandbox-blocked; see 2026-06-12 entry).
