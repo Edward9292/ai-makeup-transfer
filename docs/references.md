@@ -1,0 +1,130 @@
+# References — Papers & Code to Implement
+
+Curated for the "makeup as a translucent RGBA layer, in 3D UV space" design.
+**Primary** = directly implements our core idea. **Reuse** = pretrained building block.
+**Reference/optional** = useful comparison or future phase.
+
+## ⭐ PRIMARY — extract makeup as a UV layer + alpha matte (our core idea)
+
+### Makeup Extraction of 3D Representation via Illumination-Aware Image Decomposition
+- **Why it matters:** Extracts **bare skin + makeup + alpha matte** in **UV space** from a makeup
+  portrait — literally "makeup as a transparent layer." This is the closest published work to
+  what we want and the main blueprint for the Extraction NN.
+- Venue: Eurographics 2023 (Computer Graphics Forum)
+- Authors: Xingchao Yang, Takafumi Taketomi, Yoshihiro Kanamori
+- Paper (arXiv): https://arxiv.org/abs/2302.13279
+- PDF: https://arxiv.org/pdf/2302.13279
+- Project page: https://yangxingchao.github.io/makeup-extract-page/
+- **GitHub:** https://github.com/YangXingchao/makeup-extract
+- Journal: https://onlinelibrary.wiley.com/doi/10.1111/cgf.14762
+
+### Makeup Prior Models for 3D Facial Makeup Estimation and Applications
+- **Why it matters:** Same authors as makeup-extract, one year later. Instead of per-image
+  optimization / raw differencing, they **fit a learned makeup prior** (PCA-based or
+  StyleGAN2-based, in UV space) — regularizes away shadows/noise, much faster, more robust.
+  **This is the primary Phase 1 blueprint** (makeup-extract is the concept; this is the method).
+- Venue: CVPR 2024
+- Authors: Xingchao Yang, Takafumi Taketomi, Yuki Endo, Yoshihiro Kanamori
+- Paper (arXiv): https://arxiv.org/abs/2403.17761
+- Project page: https://yangxingchao.github.io/makeup-priors-page/
+- **GitHub:** https://github.com/YangXingchao/makeup-priors
+
+### CPM — Color-Pattern Makeup Transfer ("Lipstick ain't enough")
+- **Why it matters:** Separates makeup into independent **color** and **pattern** branches
+  (pattern = glitter/drawn designs as an overlay). Pretrained weights + datasets. Good init for
+  the color/pattern parts of extraction.
+- Venue: CVPR 2021
+- Authors: Thao Nguyen, Anh Tran, Minh Hoai (VinAI Research)
+- Paper (CVPR open access): https://openaccess.thecvf.com/content/CVPR2021/papers/Nguyen_Lipstick_Aint_Enough_Beyond_Color_Matching_for_In-the-Wild_Makeup_Transfer_CVPR_2021_paper.pdf
+- Project page: https://thaoshibe.github.io/CPM
+- **GitHub:** https://github.com/VinAIResearch/CPM
+
+### SOGAN — 3D-Aware Shadow and Occlusion Robust GAN for Makeup Transfer
+- **Why it matters:** Does makeup transfer in **3D/UV space**, robust to pose, shadow, occlusion.
+  Reference for the UV-warp + application design.
+- Venue: ACM MM 2021
+- Paper (arXiv): https://arxiv.org/abs/2104.10567
+- PDF: https://arxiv.org/pdf/2104.10567
+
+## REUSE — pretrained building blocks (no training needed)
+
+### 3DDFA_V2 — fast, stable 3D dense face alignment (3DMM fit + UV)
+- **Use for:** fitting a 3D face model and producing the canonical UV texture.
+- Venue: ECCV 2020
+- **GitHub:** https://github.com/cleardusk/3DDFA_V2
+
+### DECA — Detailed Expression Capture and Animation (alternative 3D fit + UV)
+- **Use for:** alternative 3DMM/UV pipeline; richer detail. Evaluate vs 3DDFA_V2 in Phase 0.
+- Venue: SIGGRAPH 2021
+- **GitHub:** https://github.com/yfeng95/DECA
+
+### BiSeNet face parsing — per-region segmentation (lips, eyes, brows, skin…)
+- **Use for:** masking makeup regions; clipping the extracted layer to valid areas.
+- **GitHub:** https://github.com/zllrunning/face-parsing.PyTorch
+
+### MediaPipe Face Mesh — 468-point facial landmarks
+- **Use for:** alignment, warping, lightweight preprocessing.
+- Docs: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
+
+### FreeUV — Ground-Truth-Free Realistic Facial UV Texture Recovery
+- **Use for:** upgrading `uv_unwrap.py` if UV quality becomes the bottleneck — high-fidelity UV
+  texture recovery that handles makeup, facial hair, occlusion. Same group as makeup-extract.
+- Venue: CVPR 2025
+- PDF: https://openaccess.thecvf.com/content/CVPR2025/papers/Yang_FreeUV_Ground-Truth-Free_Realistic_Facial_UV_Texture_Recovery_via_Cross-Assembly_Inference_CVPR_2025_paper.pdf
+
+## REFERENCE / OPTIONAL — comparison or future phases
+
+### SSAT — Symmetric Semantic-Aware Transformer (transfer + REMOVAL)
+- **Use for:** **single-image extraction (future phase)** — its makeup-removal estimates the bare
+  face when we only have a with-makeup photo (no pair).
+- Venue: AAAI 2022
+- Paper (arXiv): https://arxiv.org/abs/2112.03631 · PDF: https://arxiv.org/pdf/2112.03631
+- **GitHub:** https://github.com/Snowfallingplum/SSAT
+- ncnn mobile infer port: https://github.com/FeiGeChuanShu/ncnn_MakeupTransfer
+
+### EleGANt — Exquisite and Locally Editable GAN for Makeup Transfer
+- **Use for:** optional high-realism neural renderer / quality baseline; supports local editing.
+- Venue: ECCV 2022
+- Paper (arXiv): https://arxiv.org/abs/2207.09840 · PDF: https://arxiv.org/pdf/2207.09840
+- **GitHub:** https://github.com/Chenyu-Yang-2000/EleGANt
+
+### SHMT — Self-supervised Hierarchical Makeup Transfer via Latent Diffusion
+- **Use for:** quality baseline for diffusion-era transfer; self-supervised (no pseudo-pair
+  labels). Reported to preserve identity/detail better than Stable-Makeup. End-to-end though —
+  no portable layer — so baseline/refiner inspiration only, not a pipeline component.
+- Venue: NeurIPS 2024
+- Paper (arXiv): https://arxiv.org/html/2412.11058v1
+
+### Stable-Makeup — diffusion-based real-world makeup transfer
+- **Use for:** optional high-realism renderer for complex/artistic looks (heavy, GPU).
+  Caveat: comparisons (e.g. in SHMT/FLUX-Makeup papers) report identity/color shift and loss of
+  high-frequency makeup detail — evaluate before adopting.
+- Venue: SIGGRAPH 2025
+- Paper (arXiv): https://arxiv.org/abs/2403.07764 · HTML: https://arxiv.org/html/2403.07764v2
+- Project page: https://xiaojiu-z.github.io/Stable-Makeup.github.io/
+- **GitHub:** https://github.com/Xiaojiu-z/Stable-Makeup
+
+### FLUX-Makeup / DreamMakeup / BeautyDiffusion — newer diffusion transfer (2025)
+- **Use for:** tracking the diffusion SOTA; same caveat as above (end-to-end, no layer).
+- FLUX-Makeup (DiT-based): https://arxiv.org/html/2508.05069v1
+- DreamMakeup (latent-diffusion customization): https://arxiv.org/html/2510.10918v1
+- BeautyDiffusion (generative latent decomposition): https://www.sciencedirect.com/science/article/abs/pii/S1566253525003148
+
+### BeautyGAN / PSGAN — classic baselines
+- BeautyGAN (ACM MM 2018): http://liusi-group.com/projects/BeautyGAN
+- BeautyGAN paper: https://www.researchgate.net/publication/328375007
+- PSGAN (CVPR 2020): https://github.com/wtjiang98/PSGAN
+
+## Datasets (for extraction training/eval + fine-tuning the harmonization refiner)
+- **FFHQ-Makeup (2025)** — ⭐ **synthetic same-identity with/without-makeup pairs**, multiple
+  styles, identity-consistent. Directly unblocks Phase 1's "needs real same-person pairs"
+  dependency. Paper: https://arxiv.org/pdf/2508.03241
+- **MT (Makeup Transfer) dataset** — standard paired makeup/no-makeup set (via BeautyGAN project page).
+  NOTE: pairs are different people (style pairs), not same-person pairs.
+- **CPM-Real / CPM-Synt-1 / CPM-Synt-2 / Stickers** — from the CPM repo (`about-data.md`).
+- **BeautyFace** — in-the-wild makeup evaluation set.
+
+## Commercial APIs (build-vs-buy context only — none expose a portable UV/PNG layer)
+- Perfect Corp / YouCam AI Beauty API: https://yce.perfectcorp.com/ai-api
+- Banuba Makeup SDK: https://www.banuba.com/blog/best-makeup-virtual-try-on-sdks-compared-and-tested
+- ZEGOCLOUD AI Effects, Orbo BeautyGPT, TRYONNIX — similar black-box try-on services.

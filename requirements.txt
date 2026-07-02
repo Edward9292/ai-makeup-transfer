@@ -1,0 +1,22 @@
+# Core NN pipeline — reliably pip-installable on Python 3.12 / Windows.
+# Heavy reference repos (3DDFA_V2, CPM) are cloned into third_party/ and may pin older deps;
+# install those in their own envs per their READMEs if needed.
+
+# --- numerics / imaging ---
+numpy<2.0
+opencv-python>=4.9
+Pillow>=10.0
+scipy>=1.11
+scikit-image>=0.22
+
+# --- face landmarks / parsing ---
+mediapipe>=0.10.14          # Face Mesh (468 landmarks)
+
+# --- deep learning (CUDA build installed separately; see note) ---
+# torch / torchvision: install the CUDA wheel for your system, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+torch>=2.2
+torchvision>=0.17
+
+# --- demo UI (Phase 3) ---
+gradio>=4.0
