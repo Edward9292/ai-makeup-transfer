@@ -81,6 +81,14 @@ Curated for the "makeup as a translucent RGBA layer, in 3D UV space" design.
 - Paper (arXiv): https://arxiv.org/abs/2112.03631 · PDF: https://arxiv.org/pdf/2112.03631
 - **GitHub:** https://github.com/Snowfallingplum/SSAT
 - ncnn mobile infer port: https://github.com/FeiGeChuanShu/ncnn_MakeupTransfer
+- **Practical notes (Phase 2.5, adopted 2026-07-03):**
+  - **Weights ship in-repo** at `quick_start/weights/SSAT.pth` (~42 MB) — pure-PyTorch inference,
+    no build. (The README's Baidu link is for the **root-repo** SSAT_D variant only; the
+    `quick_start` weights are all Phase 2.5 needs.)
+  - Needs **face-parsing.PyTorch** (BiSeNet, MIT) label maps as semantic input: **18 classes**;
+    map hat (`label ≥ 18`) → background.
+  - **Successor repos checked 2026-07-03:** SSAT++ and CSD-MT (same author) are **Baidu-weights-
+    only** and **transfer-only** (no usable removal branch) — not useful here.
 
 ### EleGANt — Exquisite and Locally Editable GAN for Makeup Transfer
 - **Use for:** optional high-realism neural renderer / quality baseline; supports local editing.

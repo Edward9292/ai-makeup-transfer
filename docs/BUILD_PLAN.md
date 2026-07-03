@@ -234,6 +234,41 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     (Gradio demo + save/load, per-region sliders are already free via `--strength`); or evaluate
     makeup-priors PCA fitting as the extraction upgrade.
 
+- **2026-07-03 — Phase 2.5 single-image extraction working; spike gate PASSED.**
+  - **Vendored inference-only (no builds):** SSAT (`third_party/SSAT`, AAAI 2022) and
+    face-parsing.PyTorch (`third_party/face-parsing.PyTorch`, BiSeNet, MIT). Better than the
+    plan's risk estimate: **SSAT pretrained weights ship in-repo** at
+    `quick_start/weights/SSAT.pth` (~42 MB) — no Baidu download needed. BiSeNet weights
+    (`79999_iter.pth`, ~53 MB) pulled from the face-parsing.PyTorch Google Drive.
+  - `removal.py` — `BareFaceEstimator` wraps SSAT removal behind a **swappable interface**:
+    a fixed bare-reference face, 256×256 face crop → SSAT removal → paste back into the full
+    frame, so the (makeup, pseudo-bare) pair is **pixel-aligned by construction**. Requires CUDA.
+    Both same-named third-party `model.py` files are loaded via `importlib` under distinct aliases;
+    torch 2.6 needs `weights_only=False`. 3/3 real-inference tests pass (incl. a lip-chroma-
+    moves-toward-bare quality check).
+  - `extract.py --single` — bare photo is now **optional**; when omitted, SSAT synthesizes the
+    pseudo-bare and the ordinary pair pipeline runs unchanged. `meta.json` records
+    `source_mode: "pair" | "single"` (new `LookMeta.source_mode` field; old looks still load).
+    `--ref` sets the removal reference. 4/4 tests pass.
+  - **Spike gate: PASSED (human verdict, 2026-07-03).** `phase25_spike.py` compared pseudo-pair
+    vs ground-truth-pair extraction on 3 held-out FFHQ-Makeup identities. Metrics
+    (mean |dA| / false-alpha / missed over the UV face region):
+    002386 = 0.1105 / 0.0221 / 0.0507; 003125 = 0.0987 / 0.0389 / 0.0214;
+    003417 = 0.2106 / 0.1734 / 0.0041. Verdict: **concept validated** — 2 of 3 (the female-face
+    identities 002386, 003125) give plausible single-photo extraction; lips/brows transfer and the
+    cross-applied result is comparable to the pair-based one.
+  - **Known limitation (stated honestly, not a full pass):** 003417 (male face, glasses, magenta
+    lips) **fails** via **SSAT skin-tone drift** — the pseudo-bare shifts skin tone, so
+    differencing reads makeup across the whole face (false-alpha 0.17, ~8× the others) and the
+    applied result carries a full-face color cast. Root cause: domain shift (SSAT trained on the
+    mostly-female MT dataset) compounded by the pre-existing Phase-1 glasses limitation. Evidence:
+    `preprocess_out/phase25/spike_grid.png`.
+  - **Successor repos checked (2026-07-03):** SSAT++ and CSD-MT (same author) are Baidu-weights-
+    only and transfer-focused (no usable removal branch) — not useful for Phase 2.5.
+  - **NEXT:** Phase 3 (Gradio demo + save/load; per-region sliders already free via `--strength`),
+    or the makeup-priors extraction upgrade (also the most direct lever on the 003417 skin-tone
+    drift, alongside the documented diffusion-editor-removal fallback).
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain
@@ -243,4 +278,7 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
 - UV upgrade path if quality bottlenecks: FreeUV vs DECA vs 3DDFA_V2 (native build was
   sandbox-blocked; see 2026-06-12 entry).
 - Single-image extraction (Phase 2.5): SSAT removal vs diffusion-editor removal for the bare-face
-  estimate.
+  estimate. **2026-07-03: settled → SSAT** — weights ship in-repo, pure-PyTorch inference,
+  identity-preserving, fits 8GB; spike gate passed on 2/3 held-out identities. Diffusion-editor
+  removal remains the **documented fallback** if the SSAT skin-tone-drift failure mode (male /
+  heavy-domain-shift faces, e.g. 003417) needs fixing.
