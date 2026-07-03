@@ -1,7 +1,6 @@
 """End-to-end single-photo extraction (GPU + weights; skips if not vendored)."""
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip("torch")

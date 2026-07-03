@@ -48,7 +48,13 @@ CROP_EXPAND = 1.6    # square crop half-size = this * max landmark extent / 2
 
 
 def _load_module(alias: str, path: Path):
-    """Import a third-party file under a controlled name (both repos have model.py)."""
+    """Import a third-party file under a controlled name (both repos have model.py).
+
+    Some aliases (e.g. "networks", "resnet") are forced: the vendored repos use flat
+    imports (``import networks``, ``from resnet import ...``), so those modules must
+    occupy bare top-level names in sys.modules -- they can't be namespaced without
+    editing third_party code.
+    """
     if alias in sys.modules:
         return sys.modules[alias]
     spec = importlib.util.spec_from_file_location(alias, str(path))
@@ -159,8 +165,8 @@ class BareFaceEstimator:
                 "non_makeup_parse": ref_parse, "makeup_parse": parse_t}
         with torch.no_grad():
             self.gan.test_pair(data)          # populates gan.z_removal
-            removal = self.gan.z_removal[0].cpu().numpy()
-        out = ((removal.transpose(1, 2, 0) + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+            removal_arr = self.gan.z_removal[0].cpu().numpy()
+        out = ((removal_arr.transpose(1, 2, 0) + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
         out_bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
         x0, y0, x1, y1 = box
         result = face.image.copy()
