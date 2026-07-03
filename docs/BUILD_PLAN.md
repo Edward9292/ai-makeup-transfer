@@ -269,6 +269,22 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     or the makeup-priors extraction upgrade (also the most direct lever on the 003417 skin-tone
     drift, alongside the documented diffusion-editor-removal fallback).
 
+- **2026-07-03 — Phase 3 web demo working (`app.py`).**
+  - `app.py` — single-file **Gradio** `Blocks` UI, a thin layer over the existing pipeline
+    functions (no pipeline logic reimplemented). Four tabs: **extract from a pair**
+    (`extract_look`, CPU), **extract from one photo** (`extract_look_single` → SSAT removal,
+    **GPU**; fails loudly with a `gr.Error` on CPU-only machines), **apply a look**
+    (`apply_look` with per-region intensity sliders lips/eyes/brows/skin + delta/plain composite,
+    downloadable result), and a **look library** (gallery of `_checker_preview` thumbnails,
+    delete, zip-export). New looks refresh the Apply/Library dropdowns live; the Apply sliders seed
+    from each look's `blend_params`. Uploads handled as file paths (`gr.Image(type="filepath")`) to
+    match the pipeline's path-based API; BGR→RGB conversion at the display boundary. Seeded with the
+    existing `looks/`. Run: `PYTHONPATH=src python -m makeup_transfer.app`.
+  - Delivers BUILD_PLAN Phase 3's core (upload → extract → save → apply → download, per-region
+    sliders, look library). Deferred Phase-3 niceties (async "enhance" pass, upload-time pose
+    gating with actionable feedback, neutral-face look thumbnails) not yet added — the classical
+    warp+blend is already sub-second so instant preview needs no async split.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain
