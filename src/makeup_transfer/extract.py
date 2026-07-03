@@ -150,6 +150,7 @@ def extract_look(
     uv_size: int = UV_SIZE,
     sym: float = 0.5,
     store: LookStore | None = None,
+    source_mode: str = "pair",
 ):
     """Full extraction: photo pair -> UV pair -> RGBA layer -> saved look.
 
@@ -168,6 +169,7 @@ def extract_look(
         meta={
             "source_with": str(with_image),
             "source_without": str(without_image),
+            "source_mode": source_mode,
             "blend": "per-region",
             "blend_params": {
                 "skin_lab_mean": [round(float(v), 2) for v in skin_lab],
@@ -178,6 +180,33 @@ def extract_look(
     debug["uv_with"] = uv_m
     debug["uv_without"] = uv_b
     return layer, skin_lab, debug
+
+
+def extract_look_single(
+    with_image: str | Path,
+    look_name: str,
+    *,
+    uv_size: int = UV_SIZE,
+    sym: float = 0.5,
+    store: LookStore | None = None,
+    reference: str | Path | None = None,
+    pseudo_out: str | Path | None = None,
+):
+    """Single-photo extraction: SSAT removal synthesizes the bare face (Phase 2.5),
+    then the ordinary pair pipeline runs on the pseudo-pair. The pseudo-bare is
+    written to ``pseudo_out`` (or next to the phase-2.5 debug output) so it can be
+    eyeballed and re-used."""
+    from .removal import estimate_bare
+
+    pseudo = estimate_bare(with_image, reference=reference)
+    pseudo_path = Path(pseudo_out) if pseudo_out else (
+        Path("preprocess_out/phase25") / f"{look_name}_pseudo_bare.png")
+    pseudo_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(pseudo_path), pseudo)
+    return extract_look(
+        with_image, pseudo_path, look_name,
+        uv_size=uv_size, sym=sym, store=store, source_mode="single",
+    )
 
 
 def _checker_preview(layer_rgba: np.ndarray, cell: int = 16) -> np.ndarray:
@@ -198,7 +227,11 @@ def _main() -> None:
         description="Extract a makeup layer from a with/without pair of the same person."
     )
     ap.add_argument("with_image", help="face WITH makeup")
-    ap.add_argument("without_image", help="same face WITHOUT makeup")
+    ap.add_argument("without_image", nargs="?", default=None,
+                    help="same face WITHOUT makeup (omit for single-photo mode: "
+                         "SSAT removal synthesizes it)")
+    ap.add_argument("--ref", default=None,
+                    help="single-photo mode: bare reference photo for the removal GAN")
     ap.add_argument("--look", default="extracted", help="look name to save")
     ap.add_argument("--out", default="preprocess_out/phase1", help="debug output directory")
     ap.add_argument("--size", type=int, default=UV_SIZE, help="UV texture size")
@@ -211,9 +244,17 @@ def _main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    layer, skin_lab, debug = extract_look(
-        args.with_image, args.without_image, args.look, uv_size=args.size, sym=args.sym
-    )
+    if args.without_image is None:
+        layer, skin_lab, debug = extract_look_single(
+            args.with_image, args.look, uv_size=args.size, sym=args.sym,
+            reference=args.ref,
+            pseudo_out=out / f"{args.look}_pseudo_bare.png",
+        )
+        print(f"Single-photo mode: pseudo-bare written to {out / f'{args.look}_pseudo_bare.png'}")
+    else:
+        layer, skin_lab, debug = extract_look(
+            args.with_image, args.without_image, args.look, uv_size=args.size, sym=args.sym
+        )
     store = LookStore()
     print(f"Saved look '{args.look}' to {store.root / args.look}")
 

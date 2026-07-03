@@ -52,6 +52,7 @@ class LookMeta:
     #    "regions": {"lips": {"mode": "multiply", "strength": 1.0}, ...}}
     # Empty dict -> apply.py falls back to its defaults (keeps old looks loadable).
     blend_params: dict = field(default_factory=dict)
+    source_mode: str = "pair"           # "pair" = real bare photo, "single" = SSAT pseudo-bare
     notes: str = ""
 
     def to_dict(self) -> dict:
