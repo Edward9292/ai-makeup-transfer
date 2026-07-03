@@ -20,3 +20,7 @@ torchvision>=0.17
 
 # --- demo UI (Phase 3) ---
 gradio>=4.0
+
+# --- dev / phase 2.5 setup ---
+pytest>=8.0
+gdown>=5.0                  # fetches face-parsing.PyTorch weights (see BUILD_PLAN phase 2.5)
