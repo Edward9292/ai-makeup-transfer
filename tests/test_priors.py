@@ -104,15 +104,37 @@ def _collinear_prior(size=PRIOR_SIZE, seed=1):
 
 
 def test_nuisance_basis_spans_constant_and_gradient():
+    """The basis must exactly represent a per-channel constant, a linear gradient, AND a
+    degree-2 term — its docstring promises "per-channel constant + degree-2 polynomial in UV
+    coords", but until now only the constant term was ever exercised, leaving the x/y/x^2/xy/y^2
+    columns completely unchecked.
+    """
     n = nuisance_basis(PRIOR_SIZE)
     d = 3 * int(face_mask_flat(PRIOR_SIZE).sum())
     assert n.shape == (d, 18)
+    third = d // 3
+
     # A per-channel constant offset must be exactly representable.
     offset = np.zeros(d, dtype=np.float32)
-    third = d // 3
     offset[:third] = 2.5                      # L channel shifted
     coef, *_ = np.linalg.lstsq(n, offset, rcond=None)
     np.testing.assert_allclose(n @ coef, offset, atol=1e-4)
+
+    # A linear gradient (degree-1 in UV coords) must also be exactly representable.
+    mask = face_mask_flat(PRIOR_SIZE)
+    yy, xx = np.mgrid[0:PRIOR_SIZE, 0:PRIOR_SIZE]
+    x = ((xx / (PRIOR_SIZE - 1)) * 2 - 1).reshape(-1)[mask].astype(np.float32)
+    y = ((yy / (PRIOR_SIZE - 1)) * 2 - 1).reshape(-1)[mask].astype(np.float32)
+    gradient = np.zeros(d, dtype=np.float32)
+    gradient[third:2 * third] = 1.5 * x - 0.7 * y          # a channel
+    coef, *_ = np.linalg.lstsq(n, gradient, rcond=None)
+    np.testing.assert_allclose(n @ coef, gradient, atol=1e-4)
+
+    # A degree-2 term (curvature + cross term) must also be exactly representable.
+    quad = np.zeros(d, dtype=np.float32)
+    quad[2 * third:] = 2.0 * x * x - 1.0 * x * y + 0.5 * y * y   # b channel
+    coef, *_ = np.linalg.lstsq(n, quad, rcond=None)
+    np.testing.assert_allclose(n @ coef, quad, atol=1e-4)
 
 
 def test_basis_roundtrip_recovers_known_component():
@@ -196,39 +218,145 @@ def test_ridge_does_not_leak_onto_nuisance_coefficients():
 
 
 def test_lab_diff_uv_layout_is_blocked_not_interleaved():
-    """Two uniform-colour synthetic BGR textures differing by a known amount: the returned vector
-    must be [L block][a block][b block] concatenated, not interleaved.
+    """A spatially non-uniform BGR difference: the returned vector must be [L block][a block]
+    [b block] concatenated, not interleaved, AND each block's values must sit at the *correct*
+    pixel position within the block.
 
-    This layout is a contract a later task must invert exactly (to turn a flat makeup vector back
-    into a Lab UV texture). A transposed or interleaved layout would sail through the rest of the
-    suite — everything else only checks aggregate statistics — and would only surface downstream
-    as a garbled makeup layer.
+    Uniform-colour textures (the original version of this test) cannot catch a within-block pixel
+    permutation — every pixel in a uniform field has the same value, so a transposed or
+    column-major flatten produces byte-for-byte the same output vector as the correct row-major
+    flatten. Here the "with" texture carries a horizontal ramp in the Green channel, so the
+    Lab difference varies pixel-to-pixel; the expected value at each masked (row, col) is computed
+    independently (via `cv2.resize` + `skimage.color.rgb2lab`, not by calling `lab_diff_uv`) and
+    matched up using `np.nonzero` on the 2D mask, which walks row-major exactly like
+    `.reshape(-1)[mask]` does. A column-major or transposed flatten inside `lab_diff_uv` would
+    misalign values against this independently-derived expectation and fail the comparison (verified
+    against simulated column-major/transpose bugs before writing this test).
     """
+    import cv2
     from skimage import color
 
     from makeup_transfer.priors import lab_diff_uv
 
     size = 32
     src_size = 64  # exercise the internal cv2.resize path, not just an identity resize
-    color_with_bgr = np.array([80, 120, 200], dtype=np.uint8)
-    color_without_bgr = np.array([90, 110, 180], dtype=np.uint8)
 
-    uv_with = np.tile(color_with_bgr, (src_size, src_size, 1))
-    uv_without = np.tile(color_without_bgr, (src_size, src_size, 1))
+    yy, xx = np.mgrid[0:src_size, 0:src_size]
+    ramp = (xx.astype(np.float32) / (src_size - 1) * 200 + 20)   # 20..220, varies by column only
+
+    uv_with = np.zeros((src_size, src_size, 3), dtype=np.uint8)
+    uv_with[..., 0] = 90                       # B, uniform
+    uv_with[..., 1] = ramp.astype(np.uint8)    # G, horizontal ramp
+    uv_with[..., 2] = 150                      # R, uniform
+
+    uv_without = np.full((src_size, src_size, 3), (90, 110, 150), dtype=np.uint8)
 
     d = lab_diff_uv(uv_with, uv_without, size=size)
 
-    mask_count = int(face_mask_flat(size).sum())
+    mask2d = face_mask_flat(size).reshape(size, size)
+    mask_count = int(mask2d.sum())
     assert d.shape == (3 * mask_count,)
 
-    lab_with = color.rgb2lab(color_with_bgr[::-1].reshape(1, 1, 3) / 255.0).reshape(3)
-    lab_without = color.rgb2lab(color_without_bgr[::-1].reshape(1, 1, 3) / 255.0).reshape(3)
-    expected = (lab_with - lab_without).astype(np.float32)
+    # Independent ground truth: same resize/colour-space steps, computed here rather than by
+    # calling the function under test.
+    small_w = cv2.resize(uv_with, (size, size), interpolation=cv2.INTER_AREA)
+    small_b = cv2.resize(uv_without, (size, size), interpolation=cv2.INTER_AREA)
+    lab_w = color.rgb2lab(cv2.cvtColor(small_w, cv2.COLOR_BGR2RGB) / 255.0).astype(np.float32)
+    lab_b = color.rgb2lab(cv2.cvtColor(small_b, cv2.COLOR_BGR2RGB) / 255.0).astype(np.float32)
+    expected_full = lab_w - lab_b                          # (size, size, 3)
+
+    rows, cols = np.nonzero(mask2d)                        # row-major order, matches reshape(-1)
+    expected_l = expected_full[rows, cols, 0]
+    expected_a = expected_full[rows, cols, 1]
+    expected_b = expected_full[rows, cols, 2]
 
     l_block = d[:mask_count]
     a_block = d[mask_count:2 * mask_count]
     b_block = d[2 * mask_count:]
 
-    np.testing.assert_allclose(l_block, np.full(mask_count, expected[0]), atol=1e-3)
-    np.testing.assert_allclose(a_block, np.full(mask_count, expected[1]), atol=1e-3)
-    np.testing.assert_allclose(b_block, np.full(mask_count, expected[2]), atol=1e-3)
+    # Sanity: the ramp must actually make these blocks non-uniform, or the test would be no
+    # stronger than the uniform-colour version it replaces.
+    assert not np.allclose(l_block, l_block[0])
+    assert not np.allclose(a_block, a_block[0])
+    assert not np.allclose(b_block, b_block[0])
+
+    np.testing.assert_allclose(l_block, expected_l, atol=1e-3)
+    np.testing.assert_allclose(a_block, expected_a, atol=1e-3)
+    np.testing.assert_allclose(b_block, expected_b, atol=1e-3)
+
+
+def test_real_makeup_survives_the_ridge_at_default_lam():
+    """A plausible, leading-component makeup signal must not be crushed by the production ridge.
+
+    `test_nuisance_rejection_is_the_003417_fix` — and every other test in this file — is
+    monotonically *easier* to satisfy the harder `lam` shrinks makeup coefficients toward zero: the
+    rejection test only asserts an upper bound on `res.makeup`, and the roundtrip test
+    (`test_basis_roundtrip_recovers_known_component`) dodges the ridge entirely with `lam=1e-6`.
+    A degenerate `lam` that crushed ALL real makeup to nothing would pass the whole existing suite
+    while the extractor emitted an empty makeup layer. This test brackets `lam` from the other
+    side, so the two together constrain it from both directions.
+
+    Uses a realistically STEEP variance spectrum (`variances = 100.0 * (0.5 ** arange(K))`,
+    geometric decay like a real PCA's eigenvalues) rather than `_toy_prior`'s nearly-flat spectrum
+    — the ridge penalty is `lam * mean_variance / variance`, so spectrum shape directly controls how
+    hard the leading (highest-variance, most-plausible-makeup) component gets penalized. The
+    observed difference is synthesized as a known multiple of that leading component — the
+    plausible-makeup regime a real extractor should preserve.
+
+    If this fails at the production default `lam=1.0`, DO NOT loosen the threshold: it means the
+    default is miscalibrated and is destroying real makeup signal, which must be reported rather
+    than masked here (see the Task 3 review-fix report).
+    """
+    size = PRIOR_SIZE
+    d = 3 * int(face_mask_flat(size).sum())
+    rng = np.random.default_rng(2)
+    k = 6
+    comps = rng.normal(size=(k, d)).astype(np.float32)
+    comps /= np.linalg.norm(comps, axis=1, keepdims=True)
+    prior = MakeupPrior(
+        mean=np.zeros(d, dtype=np.float32),
+        components=comps,
+        variances=(100.0 * (0.5 ** np.arange(k))).astype(np.float32),
+        size=size,
+    )
+
+    truth_c0 = 3.0
+    d_obs = (truth_c0 * prior.components[0]).astype(np.float32)
+
+    res = fit(prior, d_obs, lam=1.0)
+
+    assert res.c[0] > 0.8 * truth_c0, (
+        f"lam=1.0 ridge crushed a leading-component makeup coefficient: recovered "
+        f"{res.c[0]:.4f} of true {truth_c0} ({100 * res.c[0] / truth_c0:.1f}% retained) — "
+        "the production default lam appears miscalibrated; see finding 1 in the Task 3 "
+        "review-fix report, do not loosen this threshold to make it pass"
+    )
+
+
+def test_nonzero_prior_mean_round_trips():
+    """`makeup = mean + M.c` is a contract a later task inverts; every toy prior elsewhere in this
+    suite uses `mean = zeros(D)`, so a sign error or an outright omission of `prior.mean` on either
+    side of `fit` (subtracting it from `d_obs`, or adding it back into `res.makeup`) would pass the
+    entire existing suite silently. Confirmed independently: deleting both the `- prior.mean` and
+    `prior.mean +` lines in `fit` still passes every other test in this file.
+
+    Uses a per-channel CONSTANT mean field (distinguishable from the random-direction `components`,
+    which are not smooth) so any confusion between "mean" and "makeup coefficient" signal would
+    show up in `res.c`.
+    """
+    prior = _toy_prior()
+    d = prior.mean.shape[0]
+    third = d // 3
+    mean = np.zeros(d, dtype=np.float32)
+    mean[:third] = 5.0          # L
+    mean[third:2 * third] = -3.0  # a
+    mean[2 * third:] = 2.0        # b
+    prior.mean = mean
+
+    truth_c0 = 2.0
+    d_obs = (mean + truth_c0 * prior.components[0]).astype(np.float32)
+
+    res = fit(prior, d_obs, lam=1e-6)
+
+    np.testing.assert_allclose(res.c[0], truth_c0, atol=1e-2)
+    np.testing.assert_allclose(res.makeup, d_obs, atol=1e-2)
