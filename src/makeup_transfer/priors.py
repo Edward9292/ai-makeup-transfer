@@ -30,6 +30,7 @@ import numpy as np
 
 PRIOR_SIZE = 128           # the prior is inherently low-frequency; 128 keeps the PCA in RAM
 PRIOR_PATH = Path("weights/makeup_prior_pca.npz")
+PRIOR_LAMBDA = 0.1         # calibrated ridge on the makeup coefficients (see `fit`)
 
 _BUILD_HINT = (
     "No makeup prior at {path}. Build one first:\n"
@@ -105,7 +106,7 @@ def nuisance_basis(size: int = PRIOR_SIZE) -> np.ndarray:
     return basis
 
 
-def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 0.1, iters: int = 3) -> FitResult:
+def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = PRIOR_LAMBDA, iters: int = 3) -> FitResult:
     """Robustly explain `d_obs` as makeup + nuisance, and hand back the two parts separately.
 
     `lam` scales a ridge on the makeup coefficients weighted by (mean variance / component
@@ -273,7 +274,7 @@ def extract_layer_prior(
     *,
     prior: MakeupPrior,
     residual: float = 0.0,
-    lam: float = 0.1,
+    lam: float = PRIOR_LAMBDA,
     sym: float = 0.0,
 ):
     """Prior-fitted replacement for ``extract.extract_layer``. Same return contract.
