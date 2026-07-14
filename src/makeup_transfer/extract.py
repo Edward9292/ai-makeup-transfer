@@ -36,6 +36,7 @@ import cv2
 import numpy as np
 
 from .preprocess import detect_face
+from .priors import PRIOR_LAMBDA
 from .storage import LookStore
 from .uv_unwrap import mirror_fill, region_masks_uv, unwrap
 
@@ -151,8 +152,14 @@ def extract_look(
     sym: float = 0.5,
     store: LookStore | None = None,
     source_mode: str = "pair",
+    prior=None,
+    residual: float = 0.0,
+    lam: float = PRIOR_LAMBDA,
 ):
     """Full extraction: photo pair -> UV pair -> RGBA layer -> saved look.
+
+    ``prior`` (a ``MakeupPrior``, or a path to one) switches the alpha from the Phase-1
+    chromaticity difference to the Phase-4 prior fit. ``None`` keeps the baseline unchanged.
 
     Returns ``(layer_rgba, skin_lab_mean, debug)`` (also persisted via the store).
     """
@@ -160,7 +167,20 @@ def extract_look(
 
     _, uv_m, vis_m = unwrap_to_uv(with_image, uv_size)
     _, uv_b, vis_b = unwrap_to_uv(without_image, uv_size)
-    layer, skin_lab, debug = extract_layer(uv_m, vis_m, uv_b, vis_b, sym=sym)
+
+    if prior is None:
+        layer, skin_lab, debug = extract_layer(uv_m, vis_m, uv_b, vis_b, sym=sym)
+        method = "difference"
+    else:
+        from .priors import MakeupPrior, extract_layer_prior
+
+        if not isinstance(prior, MakeupPrior):
+            prior = MakeupPrior.load(prior)
+        # sym defaults OFF under the prior: rejecting shadow is the prior's job now.
+        layer, skin_lab, debug = extract_layer_prior(
+            uv_m, vis_m, uv_b, vis_b, prior=prior, residual=residual, lam=lam, sym=0.0,
+        )
+        method = "prior"
 
     store = store or LookStore()
     store.save(
@@ -174,6 +194,10 @@ def extract_look(
             "blend_params": {
                 "skin_lab_mean": [round(float(v), 2) for v in skin_lab],
                 "regions": {k: dict(v) for k, v in DEFAULT_REGION_PARAMS.items()},
+                # Nested here, NOT a top-level meta key: LookMeta.from_dict filters to known
+                # fields, so a top-level "extract_method" would be dropped on load without
+                # erroring. blend_params is free-form, so it round-trips.
+                "extract_method": method,
             },
         },
     )
@@ -191,11 +215,18 @@ def extract_look_single(
     store: LookStore | None = None,
     reference: str | Path | None = None,
     pseudo_out: str | Path | None = None,
+    prior=None,
+    residual: float = 0.0,
+    lam: float = PRIOR_LAMBDA,
 ):
     """Single-photo extraction: SSAT removal synthesizes the bare face (Phase 2.5),
     then the ordinary pair pipeline runs on the pseudo-pair. The pseudo-bare is
     written to ``pseudo_out`` (or next to the phase-2.5 debug output) so it can be
-    eyeballed and re-used."""
+    eyeballed and re-used.
+
+    This is the mode the prior exists for: SSAT drifts the pseudo-bare's skin tone, and the
+    prior's nuisance basis is what stops that drift being read as makeup.
+    """
     from .removal import estimate_bare
 
     pseudo = estimate_bare(with_image, reference=reference)
@@ -206,6 +237,7 @@ def extract_look_single(
     return extract_look(
         with_image, pseudo_path, look_name,
         uv_size=uv_size, sym=sym, store=store, source_mode="single",
+        prior=prior, residual=residual, lam=lam,
     )
 
 
@@ -223,6 +255,8 @@ def _checker_preview(layer_rgba: np.ndarray, cell: int = 16) -> np.ndarray:
 def _main() -> None:
     import argparse
 
+    from .priors import PRIOR_PATH
+
     ap = argparse.ArgumentParser(
         description="Extract a makeup layer from a with/without pair of the same person."
     )
@@ -237,6 +271,13 @@ def _main() -> None:
     ap.add_argument("--size", type=int, default=UV_SIZE, help="UV texture size")
     ap.add_argument("--sym", type=float, default=0.5,
                     help="symmetry shadow-suppression weight in [0,1]")
+    ap.add_argument("--prior", nargs="?", const=str(PRIOR_PATH), default=None,
+                    help="use the PCA makeup prior (bare flag = the default prior, "
+                         "or pass a path to a prior .npz)")
+    ap.add_argument("--residual", type=float, default=0.0,
+                    help="gated high-frequency residual weight w in [0,1] (0 = prior only)")
+    ap.add_argument("--prior-lambda", type=float, default=PRIOR_LAMBDA,
+                    help="ridge on the makeup coefficients (higher = stronger prior)")
     ap.add_argument("--apply-to", default=None,
                     help="optional target photo to re-apply the layer to (verification)")
     args = ap.parse_args()
@@ -249,11 +290,14 @@ def _main() -> None:
             args.with_image, args.look, uv_size=args.size, sym=args.sym,
             reference=args.ref,
             pseudo_out=out / f"{args.look}_pseudo_bare.png",
+            prior=args.prior, residual=args.residual, lam=args.prior_lambda,
         )
         print(f"Single-photo mode: pseudo-bare written to {out / f'{args.look}_pseudo_bare.png'}")
     else:
         layer, skin_lab, debug = extract_look(
-            args.with_image, args.without_image, args.look, uv_size=args.size, sym=args.sym
+            args.with_image, args.without_image, args.look,
+            uv_size=args.size, sym=args.sym,
+            prior=args.prior, residual=args.residual, lam=args.prior_lambda,
         )
     store = LookStore()
     print(f"Saved look '{args.look}' to {store.root / args.look}")
@@ -261,8 +305,12 @@ def _main() -> None:
     cv2.imwrite(str(out / f"{args.look}_uv_with.png"), debug["uv_with"])
     cv2.imwrite(str(out / f"{args.look}_uv_without.png"), debug["uv_without"])
     cv2.imwrite(str(out / f"{args.look}_alpha.png"), (debug["alpha"] * 255).astype(np.uint8))
-    cv2.imwrite(str(out / f"{args.look}_d_ab.png"), (debug["d_ab"] * 255).astype(np.uint8))
-    cv2.imwrite(str(out / f"{args.look}_d_dark.png"), (debug["d_dark"] * 255).astype(np.uint8))
+    # The two paths produce different intermediates: d_ab/d_dark are the difference
+    # extractor's, makeup_field/nuisance_field are the prior's. Write whichever exist.
+    for name in ("d_ab", "d_dark", "makeup_field", "nuisance_field"):
+        if name in debug:
+            cv2.imwrite(str(out / f"{args.look}_{name}.png"),
+                        (np.clip(debug[name], 0, 1) * 255).astype(np.uint8))
     cv2.imwrite(str(out / f"{args.look}_layer_preview.png"), _checker_preview(layer))
 
     if args.apply_to:

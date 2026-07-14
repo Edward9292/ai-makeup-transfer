@@ -285,12 +285,56 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     gating with actionable feedback, neutral-face look thumbnails) not yet added — the classical
     warp+blend is already sub-second so instant preview needs no async split.
 
+- **2026-07-14 — Phase 4 makeup-priors: built, wired, and the gate FAILED. Prior stays opt-in.**
+  - `priors.py` — PCA makeup prior over **2000 pairs / 400 held-out-excluded identities** from
+    FFHQ-Makeup, at 128px UV, **K=64** components. Fitted with a robust IRLS ridge (`lam=0.1`,
+    calibrated) against an explicit **nuisance basis** (per-channel constant + degree-2 polynomial
+    in UV coords) that models shading/exposure/white-balance/skin-tone drift and is **discarded**
+    after the fit. `extract.py` gained `--prior` / `--residual` / `--prior-lambda`; `prior=None`
+    keeps the Phase-1 difference extractor **byte-for-byte** (asserted in `test_extract_prior.py`).
+  - **Gate (`priors_eval.py`, `preprocess_out/phase4/prior_grid.png`) — FAILED.** Target was
+    003417 single-mode false-alpha dropping from 0.1734 to ~0.02–0.04 with no regression on the
+    other two. Measured (mean|dA| / false-alpha / missed), best `w=0`:
+
+    | id | baseline | prior w=0 | w=0.25 | w=0.5 | w=1.0 |
+    |----|----------|-----------|--------|-------|-------|
+    | 002386 | .1105/.0221/.0507 | .0905/**.0040**/.0625 | .0913/.0053/.0631 | .0924/.0084/.0636 | .0955/.0141/.0647 |
+    | 003125 | .0987/.0389/.0214 | .1133/**.0445**/.0180 | .1125/.0452/.0185 | .1123/.0453/.0197 | .1141/.0456/.0266 |
+    | 003417 | .2106/.1734/.0041 | .1424/**.1122**/.0169 | .1433/.1119/.0176 | .1460/.1161/.0182 | .1542/.1287/.0181 |
+
+  - **Honest read.** The prior moves 003417 in the right direction (false-alpha 0.1734 → 0.1122,
+    −35%; mean|dA| 0.2106 → 0.1424) but lands **3–4× short of the 0.02–0.04 gate**. 002386 improves
+    5.5× (0.0221 → 0.0040). **003125 mildly regresses** (0.0389 → 0.0445), so "no regression on the
+    other two" also fails. The nuisance basis *attenuates* SSAT's skin-tone drift but does not
+    reject it: a degree-2 polynomial is too smooth to absorb a drift that is neither uniform nor
+    low-order across the face, and what it cannot absorb the PCA happily explains as foundation.
+  - **The residual knob is all cost, no benefit here.** false-alpha rises **monotonically** with
+    `w` on every identity, and the glasses ghosting the spec flagged as a risk visibly reopens
+    across 003417's temples by `w=1.0`. `w=0` (prior-only) is the best setting; the gated residual
+    earns nothing on this data.
+  - **Consequence: the `--prior` default is NOT flipped** (plan Task 8 Step 4 skipped by its own
+    terms). `extract.py` still defaults to the Phase-1 difference extractor. A failed gate is a
+    real result, not a reason to tune until it passes.
+  - Gate was run on a CPU-only box; SSAT needs CUDA, so `priors_eval.py` reuses the pseudo-bares
+    `phase25_spike.py` cached for the **same** CASES — i.e. the exact images the baseline numbers
+    were measured against. It hard-errors rather than synthesize a stand-in.
+  - **NEXT:** the 003417 drift is now measured, not just described, and PCA+polynomial-nuisance is
+    shown insufficient. The documented **diffusion-editor removal** fallback (see the Phase-2.5
+    open question) attacks the drift at its source and is the better lever than a richer prior.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain
   artifact class the refiner was budgeted for; revisit only if extraction upgrades expose
   composite-side artifacts.
 - makeup-priors: PCA prior (fast, low-freq) vs StyleGAN2 prior (high-freq, heavier) — start PCA.
+  **2026-07-14: settled → PCA built, gate FAILED, prior kept opt-in (`--prior`).** K=64 @128px over
+  2000 pairs, with a discarded polynomial nuisance basis. It cuts 003417's SSAT skin-tone-drift
+  false-alpha 0.1734 → 0.1122 (−35%) but misses the 0.02–0.04 gate by 3–4×, and mildly regresses
+  003125 (0.0389 → 0.0445); the gated residual only ever makes false-alpha worse (`w=0` is best).
+  **Verdict: a stronger prior is not the lever.** The drift is an SSAT-side defect, so the next
+  attempt is diffusion-editor removal (Phase-2.5 entry below), not StyleGAN2 — which would buy
+  high-frequency detail, the one thing this failure is *not* about.
 - UV upgrade path if quality bottlenecks: FreeUV vs DECA vs 3DDFA_V2 (native build was
   sandbox-blocked; see 2026-06-12 entry).
 - Single-image extraction (Phase 2.5): SSAT removal vs diffusion-editor removal for the bare-face
