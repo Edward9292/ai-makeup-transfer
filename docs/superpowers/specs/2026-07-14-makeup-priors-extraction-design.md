@@ -149,9 +149,18 @@ stays available as a flag — see the glasses risk below.
 
 ## Training data
 
-**~300–500 FFHQ-Makeup identities** (~1,500–2,500 pairs), fetched as individual files from the
-HuggingFace repo (`cyberagent/FFHQ-Makeup`, `images/`) rather than the full 3.8 GB zip — the same
-route already used for the 3 sample identities. CC BY-NC-SA 4.0, non-commercial.
+**~400 FFHQ-Makeup identities** (~2,000 pairs), extracted from the full `FFHQ-Makeup.zip`.
+
+**Verified 2026-07-14:** the `images/` folder on HuggingFace (`cyberagent/FFHQ-Makeup`) that the 3
+existing samples came from holds **only 20 identities** (110 files). The full 18k identities exist
+*only* inside the 3.8 GB zip, so the individual-file route cannot reach the corpus size this design
+needs — it caps at 17 usable identities once the held-out 3 are excluded. The zip is therefore a
+hard dependency, downloaded once and deleted after a ~400-identity subset is extracted.
+
+Because the zip download blocks nothing (every unit test is driven by *synthetic* fixtures, and a
+thin prior built from the 20 sample identities is enough to smoke-test the pipeline end to end), it
+runs in the background while the module is implemented. The full corpus is only required for the
+final gate eval. CC BY-NC-SA 4.0, non-commercial.
 
 The 3 identities currently in `data/ffhq_makeup/` (002386, 003125, 003417) are the **held-out eval
 set and must be excluded from the training corpus.** `data/ffhq_makeup/*` is gitignored apart from
