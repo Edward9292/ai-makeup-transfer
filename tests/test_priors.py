@@ -360,3 +360,24 @@ def test_nonzero_prior_mean_round_trips():
 
     np.testing.assert_allclose(res.c[0], truth_c0, atol=1e-2)
     np.testing.assert_allclose(res.makeup, d_obs, atol=1e-2)
+
+
+from makeup_transfer.priors import build_prior_from_diffs
+
+
+def test_build_prior_from_diffs_recovers_a_planted_direction():
+    """PCA over synthetic diffs that all lie along one direction => first component is it."""
+    d = 3 * int(face_mask_flat(PRIOR_SIZE).sum())
+    rng = np.random.default_rng(1)
+    direction = rng.normal(size=d).astype(np.float32)
+    direction /= np.linalg.norm(direction)
+
+    amps = rng.normal(scale=3.0, size=40).astype(np.float32)
+    diffs = np.stack([a * direction for a in amps])          # (40, D), rank 1
+
+    prior = build_prior_from_diffs(diffs, var_target=0.95, max_components=8)
+
+    assert prior.n_components >= 1
+    # First component is the planted direction, up to sign.
+    cos = abs(float(prior.components[0] @ direction))
+    assert cos > 0.99

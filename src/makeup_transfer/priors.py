@@ -169,3 +169,115 @@ def lab_diff_uv(uv_with: np.ndarray, uv_without: np.ndarray, size: int = PRIOR_S
     d = _rgb_lab(small_w) - _rgb_lab(small_b)            # (size, size, 3)
     mask = face_mask_flat(size)
     return np.concatenate([d[..., ch].reshape(-1)[mask] for ch in range(3)]).astype(np.float32)
+
+
+def build_prior_from_diffs(
+    diffs: np.ndarray,
+    *,
+    var_target: float = 0.95,
+    max_components: int = 64,
+    size: int = PRIOR_SIZE,
+) -> MakeupPrior:
+    """PCA over a (N, D) stack of difference fields.
+
+    Samples (~2k) are far fewer than dimensions (~30k), so we eigendecompose the N x N Gram matrix
+    and map back — same result as an SVD of the data matrix, a fraction of the cost, and no
+    scikit-learn dependency.
+    """
+    x = diffs.astype(np.float32)
+    mean = x.mean(axis=0)
+    xc = x - mean
+
+    gram = xc @ xc.T                                   # (N, N)
+    vals, vecs = np.linalg.eigh(gram)
+    order = np.argsort(vals)[::-1]
+    vals, vecs = vals[order], vecs[:, order]
+
+    keep = vals > 1e-8
+    vals, vecs = vals[keep], vecs[:, keep]
+    if vals.size == 0:
+        raise ValueError("degenerate corpus: no variance to build a basis from")
+
+    ratio = np.cumsum(vals) / vals.sum()
+    k = int(np.searchsorted(ratio, var_target) + 1)
+    k = max(1, min(k, max_components, vals.size))
+
+    comps = (xc.T @ vecs[:, :k]) / np.sqrt(np.maximum(vals[:k], 1e-12))   # (D, k), unit norm
+    variances = (vals[:k] / max(x.shape[0] - 1, 1)).astype(np.float32)
+    return MakeupPrior(
+        mean=mean, components=comps.T.astype(np.float32), variances=variances, size=size,
+    )
+
+
+def find_pairs(data_dir: str | Path) -> list[tuple[Path, Path]]:
+    """(makeup, bare) photo pairs from a directory of `<id>_bare.jpg` / `<id>_makeup_NN.jpg`."""
+    data_dir = Path(data_dir)
+    pairs: list[tuple[Path, Path]] = []
+    for bare in sorted(data_dir.glob("*_bare.jpg")):
+        ident = bare.name.split("_")[0]
+        for makeup in sorted(data_dir.glob(f"{ident}_makeup_*.jpg")):
+            pairs.append((makeup, bare))
+    return pairs
+
+
+def build_prior(
+    pairs: list[tuple[Path, Path]],
+    *,
+    size: int = PRIOR_SIZE,
+    var_target: float = 0.95,
+    max_components: int = 64,
+) -> MakeupPrior:
+    """Unwrap every pair to UV, take the raw Lab difference, and PCA the stack.
+
+    Pairs whose face detection fails are skipped and *counted* — a silent drop here would quietly
+    bias the basis.
+    """
+    from .extract import unwrap_to_uv
+
+    diffs, failed = [], 0
+    for i, (makeup, bare) in enumerate(pairs, 1):
+        try:
+            _, uv_m, _ = unwrap_to_uv(makeup)
+            _, uv_b, _ = unwrap_to_uv(bare)
+        except Exception as exc:                       # noqa: BLE001 — report, don't hide
+            failed += 1
+            print(f"  skip {makeup.name}: {type(exc).__name__}: {exc}")
+            continue
+        diffs.append(lab_diff_uv(uv_m, uv_b, size))
+        if i % 50 == 0:
+            print(f"  {i}/{len(pairs)} pairs unwrapped ({failed} failed)")
+
+    if not diffs:
+        raise ValueError("no usable pairs — check the data directory")
+    print(f"Built {len(diffs)} difference fields ({failed} pairs failed face detection)")
+    return build_prior_from_diffs(
+        np.stack(diffs), var_target=var_target, max_components=max_components, size=size,
+    )
+
+
+def _main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Build the PCA makeup prior from an FFHQ-Makeup subset.")
+    ap.add_argument("--build", action="store_true", help="build the prior and save it")
+    ap.add_argument("--data", default="data/ffhq_makeup_train", help="directory of bare/makeup photos")
+    ap.add_argument("--out", default=str(PRIOR_PATH))
+    ap.add_argument("--size", type=int, default=PRIOR_SIZE)
+    ap.add_argument("--var", type=float, default=0.95, help="explained-variance target")
+    ap.add_argument("--max-components", type=int, default=64)
+    args = ap.parse_args()
+
+    if not args.build:
+        ap.error("nothing to do: pass --build")
+
+    pairs = find_pairs(args.data)
+    print(f"Found {len(pairs)} pairs in {args.data}")
+    prior = build_prior(
+        pairs, size=args.size, var_target=args.var, max_components=args.max_components,
+    )
+    prior.save(args.out)
+    print(f"Saved prior: K={prior.n_components} components, size={prior.size} -> {args.out}")
+
+
+if __name__ == "__main__":
+    _main()
