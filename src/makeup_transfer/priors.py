@@ -300,21 +300,21 @@ def extract_layer_prior(
         r_img = unflatten(r, size)
         r_hi = r_img - cv2.GaussianBlur(r_img, (0, 0), max(size / 64.0, 1.0))
 
-        # Support gate: only where the prior already believes makeup lives. Thresholded
-        # RELATIVE to the fit's own 99th-percentile support (not absolute Lab units): the
-        # fitted makeup field's amplitude scale is basis-dependent — a real corpus PCA and a
-        # unit-norm synthetic basis land on wildly different absolute scales for the same
-        # "this pixel is where the prior sees makeup" judgment, so an absolute threshold either
-        # never fires (crushing the residual knob for a legitimately low-amplitude basis) or
-        # fires everywhere (defeating the gate). Normalizing by the field's own peak keeps the
-        # gate meaningful regardless of that scale.
+        # Support gate: only where the prior already believes makeup lives. Gated on the
+        # MEAN-SUBTRACTED deviation (res.makeup - prior.mean), not on res.makeup itself:
+        # res.makeup = prior.mean + M.c, and the real prior's mean has a median magnitude of
+        # ~3.9 Lab even where the observed difference is exactly zero. Thresholding
+        # `|res.makeup|` (whether against an absolute or self-relative scale) therefore
+        # measures "prior mean + makeup", not "makeup" — on a bare face it opens almost fully,
+        # and on the heaviest-makeup face it can end up *more* closed than on a bare one,
+        # because the gate is really tracking the mean field's own contrast, anti-correlated
+        # with actual makeup strength. `M.c` alone is in real Lab units for any properly-built
+        # corpus (components are unit-norm, coefficients scale like sqrt(variance)), so an
+        # absolute threshold on it is scale-correct without any per-field normalization.
         mask = face_mask_flat(size)
-        m_img = unflatten(res.makeup, size)
+        m_img = unflatten(res.makeup - prior.mean, size)
         support = np.linalg.norm(m_img, axis=2)
-        support_face = support.reshape(-1)[mask]
-        peak = float(np.percentile(support_face, 99)) if support_face.size else 0.0
-        scale = max(peak, 1e-6)
-        g = _smoothstep(support / scale, 0.1, 0.5)
+        g = _smoothstep(support, ALPHA_LO * 0.5, ALPHA_HI * 0.5)
         g = cv2.GaussianBlur(g, (0, 0), max(size / 64.0, 1.0))
 
         gated = r_hi * (residual * g)[..., None]
@@ -358,7 +358,8 @@ def extract_layer_prior(
         "alpha": alpha,
         "makeup_field": np.clip(np.abs(makeup_full) / ALPHA_HI, 0, 1),
         "nuisance_field": np.clip(
-            np.abs(cv2.resize(unflatten(res.nuisance, size), (s, s))) / ALPHA_HI, 0, 1),
+            np.abs(cv2.resize(unflatten(res.nuisance, size), (s, s),
+                               interpolation=cv2.INTER_LINEAR)) / ALPHA_HI, 0, 1),
         "c": res.c,
         "k": res.k,
     }
