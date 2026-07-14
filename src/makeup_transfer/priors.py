@@ -105,7 +105,7 @@ def nuisance_basis(size: int = PRIOR_SIZE) -> np.ndarray:
     return basis
 
 
-def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 1.0, iters: int = 3) -> FitResult:
+def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 0.1, iters: int = 3) -> FitResult:
     """Robustly explain `d_obs` as makeup + nuisance, and hand back the two parts separately.
 
     `lam` scales a ridge on the makeup coefficients weighted by (mean variance / component
@@ -115,6 +115,14 @@ def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 1.0, iters: int =
     to be O(1) or O(1e6). That shrinkage is what makes this a *prior* rather than a bare projection.
     The nuisance coefficients are left unpenalized: we want the nuisance to soak up drift greedily,
     since it gets discarded anyway.
+
+    The default `lam=0.1` is calibrated so that leading (plausible) components — the ones the
+    corpus's PCA says are the most common shapes of real makeup — pass through nearly intact, while
+    low-variance (implausible) components are still strongly shrunk. Because the per-component
+    penalty is `lam * mean(variances) / variances[j]`, how much a given component actually retains
+    depends on the corpus's own variance spectrum shape (how steeply it decays), not on `lam` alone
+    — so `lam` is swept against the real corpus's spectrum at the Phase-4 gate, not assumed correct
+    from this synthetic calibration.
 
     IRLS with Huber weights, so a few outlier pixels (a stray specular, a glasses rim) cannot drag
     the whole fit.

@@ -303,7 +303,7 @@ def test_real_makeup_survives_the_ridge_at_default_lam():
     observed difference is synthesized as a known multiple of that leading component — the
     plausible-makeup regime a real extractor should preserve.
 
-    If this fails at the production default `lam=1.0`, DO NOT loosen the threshold: it means the
+    If this fails at the production default `lam`, DO NOT loosen the threshold: it means the
     default is miscalibrated and is destroying real makeup signal, which must be reported rather
     than masked here (see the Task 3 review-fix report).
     """
@@ -323,10 +323,10 @@ def test_real_makeup_survives_the_ridge_at_default_lam():
     truth_c0 = 3.0
     d_obs = (truth_c0 * prior.components[0]).astype(np.float32)
 
-    res = fit(prior, d_obs, lam=1.0)
+    res = fit(prior, d_obs)          # exercise fit's actual default lam, not a hardcoded stand-in
 
     assert res.c[0] > 0.8 * truth_c0, (
-        f"lam=1.0 ridge crushed a leading-component makeup coefficient: recovered "
+        f"the default lam ridge crushed a leading-component makeup coefficient: recovered "
         f"{res.c[0]:.4f} of true {truth_c0} ({100 * res.c[0] / truth_c0:.1f}% retained) — "
         "the production default lam appears miscalibrated; see finding 1 in the Task 3 "
         "review-fix report, do not loosen this threshold to make it pass"
