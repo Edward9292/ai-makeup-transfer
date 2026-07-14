@@ -22,6 +22,7 @@ src/makeup_transfer/
   extract.py     [Phase 1] pair → makeup_layer.png (RGBA, UV space)   ✅
   removal.py     [Phase 2.5] SSAT makeup removal → pseudo-bare face   ✅ (GPU)
   apply.py       [Phase 2] layer + target → result.png                ✅
+  priors.py      [Phase 4] PCA makeup prior: fit instead of difference  ⚠️ opt-in (--prior; gate failed)
   app.py         [Phase 3] Gradio web demo                            ✅
 data/samples/    test images
 looks/           saved looks (fake storage):  <name>/layer.png + meta.json
