@@ -108,10 +108,13 @@ def nuisance_basis(size: int = PRIOR_SIZE) -> np.ndarray:
 def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 1.0, iters: int = 3) -> FitResult:
     """Robustly explain `d_obs` as makeup + nuisance, and hand back the two parts separately.
 
-    `lam` scales a ridge on the makeup coefficients weighted by 1/variance — implausible makeup is
-    penalized in proportion to how implausible the basis says it is. That shrinkage is what makes
-    this a *prior* rather than a bare projection. The nuisance coefficients are left unpenalized:
-    we want the nuisance to soak up drift greedily, since it gets discarded anyway.
+    `lam` scales a ridge on the makeup coefficients weighted by (mean variance / component
+    variance) — implausible makeup is penalized in proportion to how implausible the basis says it
+    is, *relative to the corpus's own average component variance*. That normalization keeps `lam`
+    scale-free: it means the same thing regardless of whether the underlying PCA eigenvalues happen
+    to be O(1) or O(1e6). That shrinkage is what makes this a *prior* rather than a bare projection.
+    The nuisance coefficients are left unpenalized: we want the nuisance to soak up drift greedily,
+    since it gets discarded anyway.
 
     IRLS with Huber weights, so a few outlier pixels (a stray specular, a glasses rim) cannot drag
     the whole fit.
@@ -123,18 +126,20 @@ def fit(prior: MakeupPrior, d_obs: np.ndarray, *, lam: float = 1.0, iters: int =
 
     kdim = m.shape[1]
     penalty = np.zeros(a.shape[1], dtype=np.float32)
-    penalty[:kdim] = lam / np.maximum(prior.variances, 1e-6)
+    v = np.maximum(prior.variances, 1e-6)
+    penalty[:kdim] = lam * (float(v.mean()) / v)
     reg = np.diag(penalty)
 
     w = np.ones(a.shape[0], dtype=np.float32)
     coef = np.zeros(a.shape[1], dtype=np.float32)
-    for _ in range(iters):
+    for i in range(iters):
         aw = a * w[:, None]
         coef = np.linalg.solve(aw.T @ a + reg, aw.T @ target)
-        resid = np.abs(target - a @ coef)
-        # Huber: unit weight inside the scale, 1/r beyond it. Scale = a robust spread estimate.
-        scale = max(1.4826 * float(np.median(resid)), 1e-3)
-        w = np.minimum(1.0, scale / np.maximum(resid, 1e-6)).astype(np.float32)
+        if i < iters - 1:
+            resid = np.abs(target - a @ coef)
+            # Huber: unit weight inside the scale, 1/r beyond it. Scale = a robust spread estimate.
+            scale = max(1.4826 * float(np.median(resid)), 1e-3)
+            w = np.minimum(1.0, scale / np.maximum(resid, 1e-6)).astype(np.float32)
 
     c, k = coef[:kdim], coef[kdim:]
     return FitResult(makeup=prior.mean + m @ c, nuisance=n @ k, c=c, k=k)
