@@ -381,3 +381,86 @@ def test_build_prior_from_diffs_recovers_a_planted_direction():
     # First component is the planted direction, up to sign.
     cos = abs(float(prior.components[0] @ direction))
     assert cos > 0.99
+
+
+import cv2
+
+from makeup_transfer.priors import extract_layer_prior, unflatten
+
+
+def test_unflatten_roundtrip():
+    size = PRIOR_SIZE
+    mask = face_mask_flat(size)
+    d = 3 * int(mask.sum())
+    vec = np.arange(d, dtype=np.float32)
+    img = unflatten(vec, size)
+    assert img.shape == (size, size, 3)
+    # outside the face chart it must be zero, inside it must carry the values back
+    assert float(np.abs(img.reshape(-1, 3)[~mask]).max()) == 0.0
+    np.testing.assert_allclose(img[..., 0].reshape(-1)[mask], vec[: int(mask.sum())])
+
+
+def _smooth_basis_prior(size=PRIOR_SIZE, k=4, seed=7):
+    """A prior whose components are genuinely LOW-FREQUENCY, so a thin stroke provably
+    cannot be represented by them. This is what makes the residual test meaningful."""
+    mask = face_mask_flat(size)
+    rng = np.random.default_rng(seed)
+    comps = []
+    for _ in range(k):
+        f = cv2.GaussianBlur(rng.normal(size=(size, size)).astype(np.float32), (0, 0), 12.0)
+        v = np.concatenate([f.reshape(-1)[mask]] * 3)
+        comps.append(v / np.linalg.norm(v))
+    d = 3 * int(mask.sum())
+    return MakeupPrior(
+        mean=np.zeros(d, dtype=np.float32),
+        components=np.stack(comps).astype(np.float32),
+        variances=np.linspace(4.0, 1.0, k).astype(np.float32),
+        size=size,
+    )
+
+
+def _stroke_uv_pair(size=512, stroke_size=PRIOR_SIZE):
+    """A UV 'pair' differing only by one thin bright stroke on the lips region."""
+    uv_without = np.full((size, size, 3), 150, dtype=np.uint8)
+    uv_with = uv_without.copy()
+    scale = size // stroke_size
+    cv2.line(uv_with, (40 * scale, 64 * scale), (88 * scale, 64 * scale), (40, 40, 220), 2 * scale)
+    vis = np.ones((size, size), dtype=np.float32)
+    return uv_with, vis, uv_without, vis
+
+
+def test_prior_only_cannot_represent_a_thin_stroke():
+    """w=0: a smooth basis must NOT capture high-frequency detail. Half of the residual story."""
+    prior = _smooth_basis_prior()
+    mask = face_mask_flat(prior.size)
+    stroke = np.zeros((prior.size, prior.size), dtype=np.float32)
+    cv2.line(stroke, (40, 64), (88, 64), 12.0, 1)
+    d_obs = np.concatenate([stroke.reshape(-1)[mask]] * 3).astype(np.float32)
+
+    recovered = fit(prior, d_obs, lam=1.0).makeup
+    assert float(np.abs(recovered).max()) < 0.5 * float(np.abs(d_obs).max())
+
+
+def test_residual_recovers_high_frequency_detail_the_basis_cannot():
+    """The residual knob's whole reason to exist: w>0 must put back detail w=0 loses.
+
+    Drives extract_layer_prior end to end (this is its unit coverage), on a UV pair whose only
+    difference is a thin stroke the smooth basis provably cannot represent.
+    """
+    prior = _smooth_basis_prior()
+    uv_with, vis_w, uv_without, vis_b = _stroke_uv_pair()
+
+    _, _, dbg_off = extract_layer_prior(
+        uv_with, vis_w, uv_without, vis_b, prior=prior, residual=0.0)
+    _, _, dbg_on = extract_layer_prior(
+        uv_with, vis_w, uv_without, vis_b, prior=prior, residual=1.0)
+
+    # The stroke sits inside the face chart; measure alpha along it.
+    s = uv_with.shape[0]
+    band = np.zeros((s, s), dtype=bool)
+    scale = s // prior.size
+    band[64 * scale - scale:64 * scale + scale, 40 * scale:88 * scale] = True
+
+    assert dbg_on["alpha"][band].mean() > dbg_off["alpha"][band].mean(), (
+        "residual=1.0 must recover more of the stroke than residual=0.0"
+    )

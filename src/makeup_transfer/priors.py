@@ -255,6 +255,116 @@ def build_prior(
     )
 
 
+def unflatten(vec: np.ndarray, size: int = PRIOR_SIZE) -> np.ndarray:
+    """Inverse of the face-masked flatten: (D,) -> (size, size, 3), zero outside the face."""
+    mask = face_mask_flat(size)
+    p = int(mask.sum())
+    img = np.zeros((size * size, 3), dtype=np.float32)
+    for ch in range(3):
+        img[mask, ch] = vec[ch * p:(ch + 1) * p]
+    return img.reshape(size, size, 3)
+
+
+def extract_layer_prior(
+    uv_with: np.ndarray,
+    vis_with: np.ndarray,
+    uv_without: np.ndarray,
+    vis_without: np.ndarray,
+    *,
+    prior: MakeupPrior,
+    residual: float = 0.0,
+    lam: float = 0.1,
+    sym: float = 0.0,
+):
+    """Prior-fitted replacement for ``extract.extract_layer``. Same return contract.
+
+    ``residual`` (the ``w`` knob) adds back the high-frequency part of what the fit could not
+    explain, gated to where the prior says makeup actually is. ``residual=0`` is prior-only.
+    ``sym`` defaults to 0 here: shadow rejection is the prior's job now, not symmetry's.
+    """
+    import cv2
+
+    from .extract import ALPHA_HI, ALPHA_LO, _rgb_lab, _smoothstep
+    from .uv_unwrap import region_masks_uv
+
+    s = uv_with.shape[0]
+    px = s // 100
+    size = prior.size
+
+    d_obs = lab_diff_uv(uv_with, uv_without, size)
+    res = fit(prior, d_obs, lam=lam, iters=3)
+
+    makeup = res.makeup
+    if residual > 0.0:
+        r = d_obs - res.makeup - res.nuisance
+        r_img = unflatten(r, size)
+        r_hi = r_img - cv2.GaussianBlur(r_img, (0, 0), max(size / 64.0, 1.0))
+
+        # Support gate: only where the prior already believes makeup lives. Thresholded
+        # RELATIVE to the fit's own 99th-percentile support (not absolute Lab units): the
+        # fitted makeup field's amplitude scale is basis-dependent — a real corpus PCA and a
+        # unit-norm synthetic basis land on wildly different absolute scales for the same
+        # "this pixel is where the prior sees makeup" judgment, so an absolute threshold either
+        # never fires (crushing the residual knob for a legitimately low-amplitude basis) or
+        # fires everywhere (defeating the gate). Normalizing by the field's own peak keeps the
+        # gate meaningful regardless of that scale.
+        mask = face_mask_flat(size)
+        m_img = unflatten(res.makeup, size)
+        support = np.linalg.norm(m_img, axis=2)
+        support_face = support.reshape(-1)[mask]
+        peak = float(np.percentile(support_face, 99)) if support_face.size else 0.0
+        scale = max(peak, 1e-6)
+        g = _smoothstep(support / scale, 0.1, 0.5)
+        g = cv2.GaussianBlur(g, (0, 0), max(size / 64.0, 1.0))
+
+        gated = r_hi * (residual * g)[..., None]
+        makeup = makeup + np.concatenate(
+            [gated[..., ch].reshape(-1)[mask] for ch in range(3)]
+        ).astype(np.float32)
+
+    makeup_img = unflatten(makeup, size)
+    makeup_full = cv2.resize(makeup_img, (s, s), interpolation=cv2.INTER_LINEAR)
+
+    # Alpha from the magnitude of the reconstructed makeup field, same ramp as the baseline.
+    dist = np.linalg.norm(makeup_full, axis=2)
+    alpha = _smoothstep(dist, ALPHA_LO, ALPHA_HI)
+
+    # --- gates: identical to the baseline extractor -----------------------------------------
+    masks = region_masks_uv(s)
+    gate = (masks["face"] & ~(masks["left_eye"] | masks["right_eye"]) & ~masks["mouth"])
+    gate = cv2.GaussianBlur(gate.astype(np.float32) / 255.0, (0, 0), float(px))
+    alpha *= gate
+    alpha *= np.clip(np.minimum(vis_with, vis_without) * 2.0, 0.0, 1.0)
+
+    if sym > 0.0:
+        alpha = (1.0 - sym) * alpha + sym * np.minimum(alpha, alpha[:, ::-1])
+
+    alpha = cv2.GaussianBlur(alpha, (0, 0), float(px))
+    hard_excl = (masks["mouth"] | masks["left_eye"] | masks["right_eye"]) > 0
+    alpha[hard_excl] = 0.0
+
+    # Bare-skin estimate from the REAL photo: observed makeup Lab minus the fitted makeup field.
+    # This is why the prior also fixes the apply side — skin_lab_mean no longer depends on the
+    # pseudo-bare's absolute skin tone at all.
+    lab_m = _rgb_lab(uv_with)
+    bare_est = lab_m - makeup_full
+    face = masks["face"] > 0
+    skin_lab_mean = bare_est[face].mean(axis=0)
+
+    rgb = cv2.cvtColor(uv_with, cv2.COLOR_BGR2RGB)
+    layer = np.dstack([rgb, (alpha * 255).astype(np.uint8)])
+
+    debug = {
+        "alpha": alpha,
+        "makeup_field": np.clip(np.abs(makeup_full) / ALPHA_HI, 0, 1),
+        "nuisance_field": np.clip(
+            np.abs(cv2.resize(unflatten(res.nuisance, size), (s, s))) / ALPHA_HI, 0, 1),
+        "c": res.c,
+        "k": res.k,
+    }
+    return layer, skin_lab_mean, debug
+
+
 def _main() -> None:
     import argparse
 
