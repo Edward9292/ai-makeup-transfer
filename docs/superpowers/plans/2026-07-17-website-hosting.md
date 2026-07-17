@@ -49,7 +49,7 @@ and the smoke-test npz out.
 **Interfaces:**
 - Produces: a repo where `git clone` + `pip install -r requirements.txt` (no torch needed) runs the CPU tabs of `app.py`. Task 3's Space build script copies these same tracked paths.
 
-- [ ] **Step 1: Update `.gitignore`**
+- [x] **Step 1: Update `.gitignore`**
 
 Replace the current blanket ignores with targeted ones. New full content of `.gitignore`:
 
@@ -86,7 +86,7 @@ weights/prior_smoke.npz
 
 (Note: the old `weights/`, `data/ffhq_makeup/*`, `*.zip` before looks are replaced/kept as shown. `*.zip` stays — look exports; the site never needs zips.)
 
-- [ ] **Step 2: Stage the assets and verify sizes**
+- [x] **Step 2: Stage the assets and verify sizes**
 
 ```bash
 git add .gitignore weights/face_landmarker.task weights/canonical_face_model.obj weights/makeup_prior_pca.npz data/ffhq_makeup/ looks/ffhq-002386-03 looks/ffhq-003125-02 looks/ffhq-003417-05
@@ -97,12 +97,12 @@ git diff --cached --stat
 
 Expected: ~25 new files, largest `weights/makeup_prior_pca.npz` (~6.3 MB). If anything ≥ 10 MB appears, STOP — that's a plan violation.
 
-- [ ] **Step 3: Run the test suite (nothing should change, but verify)**
+- [x] **Step 3: Run the test suite (nothing should change, but verify)**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q`
 Expected: same pass/skip counts as before the change (GPU tests skip on CPU boxes).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "Publish prep: track runtime assets (MediaPipe weights, PCA prior, FFHQ samples, seed looks)"
@@ -122,7 +122,7 @@ Spec: on the CPU Space the single-photo tab "stays visible but disabled, with an
 **Interfaces:**
 - Produces: `app._single_photo_available() -> tuple[bool, str]` (module-level, monkeypatchable); `build_demo()` unchanged signature. Task 3's Space runs this app unmodified.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_app_gating.py`:
 
@@ -164,12 +164,12 @@ def test_gpu_button_enabled_when_available(monkeypatch):
     assert btns[0].interactive is not False  # None or True both mean enabled
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_app_gating.py -v`
 Expected: FAIL — `AttributeError: module 'makeup_transfer.app' has no attribute '_single_photo_available'`.
 
-- [ ] **Step 3: Implement the gate in `app.py`**
+- [x] **Step 3: Implement the gate in `app.py`**
 
 Add after the `_REGIONS` line:
 
@@ -210,12 +210,12 @@ adjust the intro markdown and the button:
 
 (Only the markdown string and the `s_btn` line change; everything else in the tab stays.)
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_app_gating.py tests/ -q`
 Expected: new tests PASS, full suite green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/makeup_transfer/app.py tests/test_app_gating.py
@@ -240,7 +240,7 @@ Space — tabs 1/3/4 don't need it (verified: `extract.py` imports `.removal` la
 - Consumes: tracked asset paths from Task 1; gated `app.py` from Task 2.
 - Produces: `space_build/` laid out as: `app.py` (entry shim), `src/makeup_transfer/*.py`, `weights/{face_landmarker.task,canonical_face_model.obj}`, `looks/<3 seeds>/`, `data/ffhq_makeup/*.jpg + README.md`, `requirements.txt`, `README.md`. `build_space.py` exposes `stage(dest: Path) -> None`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_build_space.py`:
 
@@ -283,12 +283,12 @@ def test_stage_entry_shim_imports_app(tmp_path):
     assert "makeup_transfer.app" in shim
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_build_space.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'build_space'`.
 
-- [ ] **Step 3: Write the Space assets**
+- [x] **Step 3: Write the Space assets**
 
 `scripts/space_assets/requirements.txt`:
 
@@ -333,7 +333,7 @@ Sample FFHQ-Makeup images © their authors, **CC BY-NC-SA** —
 Website: https://makeup-transfer.edwardlin.dev
 ```
 
-- [ ] **Step 4: Write `scripts/build_space.py`**
+- [x] **Step 4: Write `scripts/build_space.py`**
 
 ```python
 """Stage the Hugging Face Space folder (CPU demo) into space_build/.
@@ -399,12 +399,12 @@ if __name__ == "__main__":
     print(f"Staged {n} files -> {out}")
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_build_space.py -v`
 Expected: 2 PASS.
 
-- [ ] **Step 6: Smoke-test the staged Space actually builds its UI**
+- [x] **Step 6: Smoke-test the staged Space actually builds its UI**
 
 ```bash
 .venv/Scripts/python.exe scripts/build_space.py
@@ -415,7 +415,7 @@ Expected: prints `Blocks`. (This runs the real `build_demo()` against staged ass
 
 Note: `LookStore` default resolves to `parents[2]` of `storage.py` = the staged root — correct by construction.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add scripts/ tests/test_build_space.py
@@ -432,7 +432,7 @@ git commit -m "HF Space packaging: torch-free staging script + Space card/requir
 **Interfaces:**
 - Produces: `npm run build` in `site/` emits a static `out/` with `index.html`. Task 5 fills `page.tsx` with the real sections; Task 5 relies on `site/public/` for images and `HF_SPACE_URL`/`GITHUB_URL` consts exported from `site/lib/links.ts`.
 
-- [ ] **Step 1: Write the scaffold files**
+- [x] **Step 1: Write the scaffold files**
 
 `site/package.json`:
 
@@ -555,7 +555,7 @@ export default function Home() {
 body { font-family: system-ui, sans-serif; }
 ```
 
-- [ ] **Step 2: Install and build**
+- [x] **Step 2: Install and build**
 
 ```bash
 cd site && npm install && npm run build
@@ -563,7 +563,7 @@ cd site && npm install && npm run build
 
 Expected: `✓ Compiled successfully`, `out/index.html` exists. If npm install fails on network, STOP and report.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add site/
@@ -586,7 +586,7 @@ structure, copy, and assets below are fixed content requirements.
 - Modify: `site/app/page.tsx`, `site/app/globals.css`
 - Consumes: `site/lib/links.ts` constants from Task 4.
 
-- [ ] **Step 1: Copy the result assets**
+- [x] **Step 1: Copy the result assets**
 
 ```bash
 mkdir -p site/public/results
@@ -599,7 +599,7 @@ cp preprocess_out/phase1/ffhq-002386-03_layer_preview.png site/public/results/
 cp data/ffhq_makeup/002386_makeup_03.jpg data/ffhq_makeup/002386_bare.jpg site/public/results/
 ```
 
-- [ ] **Step 2: Build the page**
+- [x] **Step 2: Build the page**
 
 Required sections, in order, all reachable via nav anchors:
 
@@ -612,7 +612,7 @@ Required sections, in order, all reachable via nav anchors:
 
 All `<img>` get `loading="lazy"` except the hero-adjacent one; the iframe gets `loading="lazy"` too (grids are ~2 MB each).
 
-- [ ] **Step 3: Build and verify sections**
+- [x] **Step 3: Build and verify sections**
 
 ```bash
 cd site && npm run build
@@ -621,11 +621,11 @@ grep -c 'id="hero"\|id="how"\|id="results"\|id="demo"\|id="notes"\|id="credits"'
 
 Expected: build passes; grep finds all 6 section ids (count ≥ 6 across nav+sections).
 
-- [ ] **Step 4: Visual check**
+- [x] **Step 4: Visual check**
 
 Serve `site/out/` (`npx serve out` or `python -m http.server -d out`), screenshot/eyeball: readable at 375 px and 1440 px widths, images load, iframe placeholder renders (Space not live yet — a broken iframe is expected; verify the fallback link shows).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add site/
@@ -641,7 +641,7 @@ git commit -m "Site: showcase page (hero, pipeline, results, demo embed, honest 
 - Modify: `README.md` (fix the stale "weights in repo" claim, add site/demo links + license/credits section)
 - Modify: `docs/BUILD_PLAN.md` (progress-log entry)
 
-- [ ] **Step 1: Write `docs/HOSTING.md`** — must contain, per spec: current $0 setup table (Vercel Hobby / HF Space CPU Basic / GitHub public), DNS record (`makeup-transfer` CNAME → `cname.vercel-dns.com`), tier limits (no online GPU; Space sleeps → cold start; Vercel Hobby non-commercial), upgrade path (1. HF PRO/ZeroGPU → GPU tab online; 2. Modal/Replicate/RunPod serverless API + upload UI = full-web-app phase, ~$0.001–0.01/run; 3. real storage backend behind `storage.py` interface), and the **manual deploy runbook**:
+- [x] **Step 1: Write `docs/HOSTING.md`** — must contain, per spec: current $0 setup table (Vercel Hobby / HF Space CPU Basic / GitHub public), DNS record (`makeup-transfer` CNAME → `cname.vercel-dns.com`), tier limits (no online GPU; Space sleeps → cold start; Vercel Hobby non-commercial), upgrade path (1. HF PRO/ZeroGPU → GPU tab online; 2. Modal/Replicate/RunPod serverless API + upload UI = full-web-app phase, ~$0.001–0.01/run; 3. real storage backend behind `storage.py` interface), and the **manual deploy runbook**:
 
   1. GitHub: run publish checklist (Task 7) → flip repo public.
   2. HF: `python scripts/build_space.py` → create Space `makeup-transfer` (Gradio, CPU Basic) → push `space_build/` contents → verify CPU tabs in browser.
@@ -649,11 +649,11 @@ git commit -m "Site: showcase page (hero, pipeline, results, demo embed, honest 
   4. DNS: add CNAME at the edwardlin.dev provider → add domain in Vercel → wait for TLS.
   5. Post-launch: update `site/lib/links.ts` if the Space/repo slugs differ, redeploy.
 
-- [ ] **Step 2: Update `README.md`** — status line points at the site + Space + HOSTING.md; setup section says torch is optional (only single-photo/GPU path) and third_party is fetch-on-demand for the GPU tab; add "Licenses & credits" (FFHQ-Makeup CC BY-NC-SA attribution, MT dataset research-scoped, MediaPipe Apache-2.0, vendored repos listed with licenses, note repo content is for research/portfolio use).
+- [x] **Step 2: Update `README.md`** — status line points at the site + Space + HOSTING.md; setup section says torch is optional (only single-photo/GPU path) and third_party is fetch-on-demand for the GPU tab; add "Licenses & credits" (FFHQ-Makeup CC BY-NC-SA attribution, MT dataset research-scoped, MediaPipe Apache-2.0, vendored repos listed with licenses, note repo content is for research/portfolio use).
 
-- [ ] **Step 3: BUILD_PLAN progress-log entry** — dated 2026-07-17: website + hosting built (site/, Space packaging, gating change, tracked assets); spec correction noted (BiSeNet NOT needed by CPU tabs — excluded from Space); what remains manual (runbook in HOSTING.md).
+- [x] **Step 3: BUILD_PLAN progress-log entry** — dated 2026-07-17: website + hosting built (site/, Space packaging, gating change, tracked assets); spec correction noted (BiSeNet NOT needed by CPU tabs — excluded from Space); what remains manual (runbook in HOSTING.md).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/HOSTING.md README.md docs/BUILD_PLAN.md
@@ -666,7 +666,7 @@ git commit -m "Docs: hosting plan + deploy runbook; README licenses/credits; BUI
 
 **Files:** none new (verification only; fixes go where the failure is)
 
-- [ ] **Step 1: File-size gate**
+- [x] **Step 1: File-size gate**
 
 ```bash
 git ls-files -z | xargs -0 -I{} du -b "{}" | sort -rn | head -5
@@ -674,7 +674,7 @@ git ls-files -z | xargs -0 -I{} du -b "{}" | sort -rn | head -5
 
 Expected: max ≈ 6.3 MB (`makeup_prior_pca.npz`). Nothing ≥ 100 MB (GitHub), nothing ≥ 10 MB (keeps LFS out of play).
 
-- [ ] **Step 2: Secrets/personal-data scan**
+- [x] **Step 2: Secrets/personal-data scan**
 
 ```bash
 git log --all --oneline | wc -l
@@ -684,11 +684,11 @@ git grep -iE "api[_-]?key|secret|token|password" -- . ':!docs/superpowers' ':!si
 Also scan history: `git log --all -p -- .env* */secrets* 2>/dev/null | head` → expect empty.
 Expected: CLEAN (matches only in innocuous contexts, reviewed by eye).
 
-- [ ] **Step 3: License inventory sanity**
+- [x] **Step 3: License inventory sanity**
 
 Confirm: tracked content = own code (choose MIT — add `LICENSE` file if absent), MediaPipe assets (Apache-2.0, redistribution OK), FFHQ-Makeup samples + PCA prior derived from them (CC BY-NC-SA, attributed in README + site + Space card), seed looks (derived from FFHQ-Makeup, same license note). `third_party/` is NOT tracked → no vendored-license blockers. If `LICENSE` is missing, create MIT with "Edward Lin" and note the data-license exception ("sample images and derived looks: CC BY-NC-SA, see README").
 
-- [ ] **Step 4: Full suite + site build, one last time**
+- [x] **Step 4: Full suite + site build, one last time**
 
 ```bash
 .venv/Scripts/python.exe -m pytest tests/ -q
@@ -697,13 +697,13 @@ cd site && npm run build
 
 Expected: all green, build clean.
 
-- [ ] **Step 5: Commit any checklist fixes + final commit**
+- [x] **Step 5: Commit any checklist fixes + final commit**
 
 ```bash
 git add -A && git commit -m "Publish checklist: license file + final verification"
 ```
 
-- [ ] **Step 6: Report to user** — everything below requires their accounts and stays manual (per HOSTING.md runbook): flip repo public, create the HF Space and push `space_build/`, import to Vercel (root dir `site/`), add the DNS CNAME, then update `site/lib/links.ts` slugs if they differ and push.
+- [x] **Step 6: Report to user** — everything below requires their accounts and stays manual (per HOSTING.md runbook): flip repo public, create the HF Space and push `space_build/`, import to Vercel (root dir `site/`), add the DNS CNAME, then update `site/lib/links.ts` slugs if they differ and push.
 
 ---
 
