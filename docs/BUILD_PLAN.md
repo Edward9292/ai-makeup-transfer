@@ -322,6 +322,30 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     shown insufficient. The documented **diffusion-editor removal** fallback (see the Phase-2.5
     open question) attacks the drift at its source and is the better lever than a richer prior.
 
+- **2026-07-17 — Website + hosting built (spec: 2026-07-17-website-hosting-design.md).**
+  - `site/` — static Next.js (App Router, `output: "export"`) showcase for Vercel (root dir
+    `site/`): hero with a real extraction specimen strip, pipeline SVG, results gallery,
+    HF Space embed, engineering notes **including the failed Phase-4 prior gate**, credits.
+    Verified: `npm run build` clean; desktop 1440px + emulated 375px screenshots checked
+    (no horizontal overflow; an apparent mobile overflow was a headless-Chrome artifact —
+    layout clamps at 500px while the screenshot crops to 375px).
+  - `app.py` — single-photo tab now **disabled up front** (button `interactive=False` + honest
+    note) when SSAT weights / torch / CUDA are missing, instead of failing on click
+    (`_single_photo_available()`, tested in `tests/test_app_gating.py`).
+  - `scripts/build_space.py` — stages a **torch-free** HF Space into `space_build/` (app code,
+    MediaPipe weights, 3 seed looks, FFHQ samples, Space card + CPU requirements). Verified:
+    staged `app.py` imports and builds the Blocks UI. **Spec correction:** BiSeNet is only
+    used by the GPU removal path (`removal.py`), NOT by the CPU tabs — the spec's "BiSeNet
+    included" is wrong; the Space ships MediaPipe assets only.
+  - **Publish prep:** small runtime assets are now git-tracked (MediaPipe landmarker +
+    canonical mesh, fitted PCA prior, 18 FFHQ sample images, 3 seed looks — largest 6.3 MB);
+    `third_party/` stays untracked with clone-on-demand instructions in README. README
+    rewritten (torch optional, licenses/credits section); `docs/HOSTING.md` added ($0 tier
+    table, limits, upgrade path, manual deploy runbook).
+  - **Remaining steps are account-bound (runbook in HOSTING.md):** flip repo public, create
+    the HF Space + push `space_build/`, import to Vercel (root `site/`), DNS CNAME, then
+    update `site/lib/links.ts` slugs if they differ.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain
