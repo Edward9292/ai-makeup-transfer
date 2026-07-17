@@ -41,6 +41,21 @@ store = LookStore()
 _REGIONS = ["lips", "eyes", "brows", "skin"]
 
 
+def _single_photo_available() -> tuple[bool, str]:
+    """Can the SSAT single-photo tab actually run here? (ok, reason-if-not)."""
+    from .removal import SSAT_WEIGHTS  # safe: removal.py imports torch lazily
+    if not SSAT_WEIGHTS.exists():
+        return False, ("SSAT weights are not present on this machine "
+                       "(third_party/SSAT). Clone the repo and run locally with a GPU.")
+    try:
+        import torch
+    except ImportError:
+        return False, "PyTorch is not installed here."
+    if not torch.cuda.is_available():
+        return False, "No CUDA GPU is available here."
+    return True, ""
+
+
 # --- small helpers ---------------------------------------------------------------------------
 def _bgr2rgb(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -206,9 +221,14 @@ def build_demo() -> gr.Blocks:
 
             # --- Tab 2: extract from one photo ----------------------------------------------
             with gr.Tab("Extract from one photo"):
+                gpu_ok, gpu_why = _single_photo_available()
+                note = "" if gpu_ok else (
+                    f"\n\n⚠️ **Disabled on this machine:** {gpu_why} "
+                    "The other tabs run fine on CPU."
+                )
                 gr.Markdown(
                     "One photo only. SSAT makeup **removal** synthesizes the bare face, then the "
-                    "same pair pipeline runs. **Requires a CUDA GPU.**"
+                    "same pair pipeline runs. **Requires a CUDA GPU.**" + note
                 )
                 with gr.Row():
                     s_with = gr.Image(label="With makeup", type="filepath")
@@ -217,7 +237,8 @@ def build_demo() -> gr.Blocks:
                     s_name = gr.Textbox(label="Look name", placeholder="e.g. stolen-look")
                     s_sym = gr.Slider(0.0, 1.0, value=0.5, step=0.05,
                                       label="Shadow suppression (UV symmetry)")
-                s_btn = gr.Button("Extract look (GPU)", variant="primary")
+                s_btn = gr.Button("Extract look (GPU)", variant="primary",
+                                  interactive=gpu_ok)
                 s_status = gr.Markdown()
                 with gr.Row():
                     s_pseudo = gr.Image(label="Synthesized bare face")
