@@ -1,2 +1,586 @@
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; }
+/* ------------------------------------------------------------------
+   AI Makeup Transfer — showcase
+   Palette: blush porcelain / plum ink / lipstick pigment / rouge / shadow gold
+   Type: Bodoni Moda (display) · Archivo (body) · IBM Plex Mono (lab data)
+------------------------------------------------------------------- */
+
+:root {
+  --porcelain: #fbf6f6;
+  --porcelain-deep: #f3eaec;
+  --ink: #2a2226;
+  --ink-soft: #5c4f55;
+  --pigment: #8e2143;
+  --rouge: #c4507a;
+  --gold: #b08d3e;
+  --checker: #ece3e5;
+  --line: #e2d5d9;
+
+  --measure: 68rem;
+  --measure-text: 46rem;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+body {
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  color: var(--ink);
+  background:
+    /* faint alpha-checkerboard wash along the top edge — the transparency motif */
+    linear-gradient(var(--porcelain) 82%, transparent),
+    repeating-conic-gradient(var(--checker) 0% 25%, var(--porcelain) 0% 50%) 0 0 / 28px 28px;
+  background-color: var(--porcelain);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: var(--pigment);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--rouge);
+}
+
+:focus-visible {
+  outline: 2px solid var(--pigment);
+  outline-offset: 3px;
+}
+
+code {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.9em;
+  background: var(--porcelain-deep);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+/* ---------------- nav ---------------- */
+
+.topnav {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 1.4rem 1.5rem 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+}
+
+.topnav-brand {
+  color: var(--pigment);
+  font-weight: 500;
+}
+
+.topnav-links {
+  display: flex;
+  gap: 1.4rem;
+  flex-wrap: wrap;
+}
+
+.topnav-links a {
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.topnav-links a:hover {
+  color: var(--pigment);
+}
+
+/* ---------------- shared band layout ---------------- */
+
+.band {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 5.5rem 1.5rem 2rem;
+}
+
+.eyebrow {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.eyebrow::before {
+  content: "";
+  width: 2.2rem;
+  height: 2px;
+  background: var(--pigment);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display), serif;
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: 0.005em;
+}
+
+h1 {
+  font-size: clamp(2.9rem, 8.5vw, 5.6rem);
+  margin: 1.1rem 0 1.4rem;
+}
+
+h1 em {
+  font-style: italic;
+  color: var(--pigment);
+}
+
+h2 {
+  font-size: clamp(1.9rem, 4vw, 2.7rem);
+  margin: 0.9rem 0 1rem;
+  max-width: 30ch;
+}
+
+h3 {
+  font-size: 1.35rem;
+  margin: 2.6rem 0 0.6rem;
+}
+
+.lede {
+  max-width: var(--measure-text);
+  color: var(--ink-soft);
+  margin-bottom: 1.6rem;
+}
+
+.muted {
+  color: var(--ink-soft);
+  font-style: italic;
+  font-size: 0.8em;
+}
+
+/* ---------------- gate chips ---------------- */
+
+.gate {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  padding: 0.22em 0.65em;
+  border-radius: 2px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.gate-passed {
+  color: var(--ink);
+  border: 1px solid var(--ink);
+}
+
+.gate-partial {
+  color: var(--gold);
+  border: 1px solid var(--gold);
+}
+
+.gate-failed {
+  color: var(--porcelain);
+  background: var(--pigment);
+  border: 1px solid var(--pigment);
+}
+
+/* ---------------- hero ---------------- */
+
+.hero {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 5rem 1.5rem 2rem;
+  animation: rise 0.7s ease-out both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.hero-sub {
+  max-width: var(--measure-text);
+  font-size: 1.15rem;
+  color: var(--ink-soft);
+}
+
+.hero-ctas {
+  display: flex;
+  gap: 0.9rem;
+  margin: 1.8rem 0 3.2rem;
+  flex-wrap: wrap;
+}
+
+.btn {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+  text-decoration: none;
+  padding: 0.75em 1.4em;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  color: var(--ink);
+  background: transparent;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover {
+  background: var(--ink);
+  color: var(--porcelain);
+}
+
+.btn-primary {
+  background: var(--pigment);
+  border-color: var(--pigment);
+  color: var(--porcelain);
+}
+
+.btn-primary:hover {
+  background: var(--rouge);
+  border-color: var(--rouge);
+  color: var(--porcelain);
+}
+
+/* ---------------- specimen strip (signature) ---------------- */
+
+.specimen {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 4px;
+  padding: 1.2rem;
+}
+
+.specimen-strip {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto 1fr;
+  gap: 0.9rem;
+  align-items: center;
+}
+
+.specimen-cell img,
+.specimen-cell .crop-right {
+  border-radius: 3px;
+  aspect-ratio: 1;
+  object-fit: cover;
+  width: 100%;
+}
+
+.crop-right {
+  overflow: hidden;
+  position: relative;
+}
+
+.crop-right img {
+  /* side_by_side.png is [source | result]; show the result half */
+  width: 200%;
+  max-width: 200%;
+  margin-left: -100%;
+  aspect-ratio: 2 / 1;
+}
+
+.specimen-cell figcaption,
+.specimen-cell + .specimen-cell figcaption {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+  margin-top: 0.6rem;
+}
+
+.specimen-arrow {
+  font-size: 1.4rem;
+  color: var(--rouge);
+}
+
+.specimen-note {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px dashed var(--line);
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  max-width: 60ch;
+}
+
+@media (max-width: 640px) {
+  .specimen-strip {
+    grid-template-columns: 1fr;
+  }
+  .specimen-arrow {
+    transform: rotate(90deg);
+    justify-self: center;
+  }
+}
+
+/* ---------------- pipeline diagram ---------------- */
+
+.pipeline-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 1.4rem 1rem;
+  margin: 1.4rem 0;
+}
+
+.pipeline-svg {
+  min-width: 900px;
+  width: 100%;
+  display: block;
+}
+
+.pl-lane {
+  font-family: var(--font-mono), monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  fill: var(--ink-soft);
+}
+
+.pl-node {
+  font-family: var(--font-mono), monospace;
+  font-size: 11.5px;
+  fill: var(--ink);
+}
+
+.pl-node-accent {
+  fill: var(--pigment);
+  font-weight: 500;
+}
+
+.pl-carry {
+  font-family: var(--font-display), serif;
+  font-style: italic;
+  font-size: 15px;
+  fill: var(--rouge);
+}
+
+.method-foot {
+  max-width: var(--measure-text);
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+}
+
+/* ---------------- results ---------------- */
+
+.frame {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.9rem;
+  margin: 1.6rem 0;
+}
+
+.frame img {
+  border-radius: 2px;
+  width: 100%;
+}
+
+.frame figcaption {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.74rem;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+  margin-top: 0.7rem;
+}
+
+.duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.2rem;
+}
+
+.duo .frame {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .duo {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------------- demo (dark band) ---------------- */
+
+.band-dark {
+  max-width: none;
+  background: var(--ink);
+  color: var(--porcelain);
+  padding: 5.5rem 0 4.5rem;
+  margin-top: 4rem;
+}
+
+.band-dark > * {
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+}
+
+.band-dark .eyebrow {
+  color: #b9a8af;
+}
+
+.band-dark .lede {
+  color: #cfc0c6;
+}
+
+.band-dark a {
+  color: var(--rouge);
+}
+
+.demo-frame {
+  max-width: var(--measure);
+  padding: 0 1.5rem;
+}
+
+.demo-frame iframe {
+  width: 100%;
+  height: 720px;
+  border: 1px solid #4b3d43;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.demo-fallback {
+  font-size: 0.9rem;
+  margin-top: 1rem;
+  color: #cfc0c6;
+}
+
+/* ---------------- engineering notes ---------------- */
+
+.log {
+  list-style: none;
+  max-width: var(--measure-text);
+  border-left: 2px solid var(--line);
+  margin-top: 2.2rem;
+}
+
+.log li {
+  position: relative;
+  padding: 0 0 2.8rem 1.8rem;
+}
+
+.log li::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 0.45rem;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--porcelain);
+  border: 2px solid var(--pigment);
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.log-phase {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  color: var(--ink-soft);
+}
+
+.log h3 {
+  margin: 0.5rem 0 0.6rem;
+}
+
+.log p {
+  color: var(--ink-soft);
+  font-size: 0.98rem;
+}
+
+.log .frame {
+  margin: 1.3rem 0 0.9rem;
+}
+
+.log-link {
+  font-size: 0.9rem;
+}
+
+/* ---------------- credits ---------------- */
+
+.band-credits {
+  border-top: 1px solid var(--line);
+  margin-top: 4.5rem;
+  padding-bottom: 3rem;
+}
+
+.credit-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2.5rem;
+  max-width: var(--measure);
+}
+
+.credit-cols h3 {
+  font-size: 1.05rem;
+  margin: 1.4rem 0 0.6rem;
+}
+
+.credit-cols ul {
+  list-style: none;
+}
+
+.credit-cols li {
+  padding: 0.32rem 0;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 700px) {
+  .credit-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+.foot {
+  margin-top: 3.5rem;
+  padding-top: 1.2rem;
+  border-top: 1px dashed var(--line);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+}
