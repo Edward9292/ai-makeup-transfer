@@ -3,18 +3,26 @@ __pycache__/
 *.pyc
 third_party/*/
 !third_party/.gitkeep
+# looks: only the three seed looks are tracked; everything else is user output
 looks/*/
 !looks/.gitkeep
+!looks/ffhq-002386-03/
+!looks/ffhq-003125-02/
+!looks/ffhq-003417-05/
 data/samples/*
 !data/samples/.gitkeep
-data/ffhq_makeup/*
-!data/ffhq_makeup/README.md
 data/ffhq_makeup_train/
 data/mt/*
 !data/mt/.gitkeep
 preprocess_out/
+space_build/
+site/node_modules/
+site/.next/
+site/out/
 *.zip
-weights/
+# weights: MediaPipe assets + fitted PCA prior are tracked (small, needed at runtime);
+# third-party .pth/.onnx stay out
+weights/prior_smoke.npz
 *.pth
 *.onnx
 *.tar
