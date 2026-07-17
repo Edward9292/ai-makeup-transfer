@@ -18,7 +18,7 @@ to any face with a skin-tone-aware blend (skin shows through; the look adapts pe
 
 **On this CPU Space:** extract-from-a-pair, apply-a-look, and the look library all work.
 The *extract-from-one-photo* tab needs a CUDA GPU (SSAT makeup removal) and is disabled
-here — clone the [GitHub repo](https://github.com/edwardlin-dev/ai-makeup-transfer) and
+here — clone the [GitHub repo](https://github.com/Edward9292/ai-makeup-transfer) and
 run locally to use it.
 
 Sample FFHQ-Makeup images © their authors, **CC BY-NC-SA** —
