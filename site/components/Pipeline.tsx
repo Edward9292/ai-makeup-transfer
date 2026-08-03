@@ -1,10 +1,10 @@
 /* Pipeline diagram: two lanes (extract, apply), drawn as an SVG batch-record flow.
    Pure presentational SVG — no client JS. */
 
-const INK = "#2A2226";
-const PIGMENT = "#8E2143";
-const ROUGE = "#C4507A";
-const FAINT = "#D8CCD0";
+const INK = "#17121A";
+const PIGMENT = "#B0173F";
+const ROUGE = "#C86A85";
+const FAINT = "#DED2CF";
 
 type NodeSpec = { x: number; label: string[]; accent?: boolean; checker?: boolean };
 
@@ -48,7 +48,7 @@ function Lane({
                       y={y + 4 + r * 6}
                       width={6}
                       height={6}
-                      fill="#EDE4E6"
+                      fill="#EFE6E3"
                     />
                   ) : null
                 )
@@ -100,7 +100,7 @@ export default function Pipeline() {
 
         <Lane
           y={46}
-          title="EXTRACT — look in, layer out"
+          title="Extract"
           nodes={[
             { x: xs[0], label: ["photo pair", "(or one photo)"] },
             { x: xs[1], label: ["468 landmarks", "MediaPipe"] },
@@ -120,12 +120,12 @@ export default function Pipeline() {
           markerEnd="url(#arrow)"
         />
         <text x={(xs[0] + xs[4]) / 2 + 67} y={140} textAnchor="middle" className="pl-carry">
-          one portable file — save it, share it, re-apply it
+          one file — save it, share it, re-apply it
         </text>
 
         <Lane
           y={200}
-          title="APPLY — any face, its own skin"
+          title="Apply"
           nodes={[
             { x: xs[0], label: ["layer + target", "photo"], accent: true },
             { x: xs[1], label: ["UV warp", "to target"] },
