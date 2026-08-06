@@ -1,4 +1,4 @@
-"""The single-photo (GPU) tab must be visible but disabled when SSAT/CUDA is absent."""
+"""The single-photo (GPU) panel must be visible but disabled when SSAT/CUDA is absent."""
 import gradio as gr
 
 from makeup_transfer import app
@@ -6,7 +6,7 @@ from makeup_transfer import app
 
 def _gpu_buttons(demo):
     return [b for b in demo.blocks.values()
-            if isinstance(b, gr.Button) and b.value == "Extract look (GPU)"]
+            if isinstance(b, gr.Button) and b.value == "Extract look on GPU"]
 
 
 def test_single_photo_available_returns_tuple():
@@ -14,7 +14,7 @@ def test_single_photo_available_returns_tuple():
     assert isinstance(ok, bool)
     assert isinstance(why, str)
     if not ok:
-        assert why  # a disabled tab must say why
+        assert why  # a disabled panel must say why
 
 
 def test_gpu_button_disabled_when_unavailable(monkeypatch):

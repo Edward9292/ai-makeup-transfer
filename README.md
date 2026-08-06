@@ -20,6 +20,7 @@ site/            static Next.js showcase site (Vercel root dir = site/)
 scripts/         build_space.py — stages the Hugging Face Space demo into space_build/
 src/makeup_transfer/
   preprocess.py  face detect / landmarks / region masks   (MediaPipe)
+  occlusion.py   skin vs. hair/hands/glasses mask          (MediaPipe segmenter)
   uv_unwrap.py   image ↔ canonical UV texture (MediaPipe canonical mesh, no 3DMM)
   storage.py     LOCAL-FILE fake storage (swappable interface for future backend)
   extract.py     [Phase 1]   pair → makeup_layer.png (RGBA, UV space)      ✅
@@ -27,7 +28,7 @@ src/makeup_transfer/
   apply.py       [Phase 2]   layer + target → result.png                   ✅
   priors.py      [Phase 4]   PCA makeup prior  ⚠️ opt-in (--prior; gate failed, see BUILD_PLAN)
   app.py         [Phase 3]   Gradio web demo                               ✅
-weights/         MediaPipe landmarker + canonical mesh + fitted PCA prior (tracked, small)
+weights/         MediaPipe landmarker + segmenter + canonical mesh + fitted PCA prior (tracked)
 data/ffhq_makeup/  FFHQ-Makeup sample pairs (CC BY-NC-SA, see Licenses below)
 looks/           saved looks: <name>/layer.png + meta.json (3 samples tracked)
 third_party/     NOT tracked — cloned on demand for the GPU single-photo path (see below)
@@ -43,6 +44,18 @@ pip install -r requirements.txt
 Torch is only needed for the **single-photo (GPU) path**; everything else — pair extraction,
 apply, the web demo's CPU tabs — runs without it.
 
+The MediaPipe assets under `weights/` are tracked, so setup is just the pip install. If one is
+ever missing, re-fetch it with:
+
+```powershell
+curl -L -o weights/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+curl -L -o weights/selfie_multiclass_256x256.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite
+```
+
+The segmenter (`selfie_multiclass_256x256.tflite`) is what keeps hair, hands and glasses out of
+an extracted look and stops makeup being painted on top of them at apply time. Without it the
+pipeline still runs — occlusion masking just switches itself off.
+
 ## Run the web demo
 
 ```powershell
@@ -50,14 +63,16 @@ $env:PYTHONPATH = "src"
 python -m makeup_transfer.app
 ```
 
-Open the printed URL (default http://127.0.0.1:7860). The **Extract-from-a-pair**, **Apply**,
-and **Look library** tabs run on CPU with the assets already in this repo; try applying
-`ffhq-002386-03` to `data/ffhq_makeup/003417_bare.jpg`.
+Open the printed URL (default http://127.0.0.1:7860). The demo is three steps in the order you
+work in them — **Try a look** (pick a saved look + a face → before/after), **Make a look**
+(pair of photos → saved layer), **Your looks** (browse / export / delete). All three run on CPU
+with the assets already in this repo; try applying `ffhq-002386-03` to
+`data/ffhq_makeup/003417_bare.jpg`.
 
-### Optional: the single-photo (GPU) tab
+### Optional: the single-photo (GPU) path
 
-Needs a CUDA GPU plus two untracked third-party pieces (the tab is disabled with a note
-until they exist):
+Lives in the "Only have one photo?" panel under **Make a look**. Needs a CUDA GPU plus two
+untracked third-party pieces (the panel is disabled with a note until they exist):
 
 ```powershell
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -82,7 +97,8 @@ git clone https://github.com/zllrunning/face-parsing.PyTorch third_party/face-pa
   fitted prior `weights/makeup_prior_pca.npz` (derived from FFHQ-Makeup): **CC BY-NC-SA** —
   © the [FFHQ-Makeup](https://huggingface.co/datasets/cyberagent/FFHQ-Makeup) authors
   (CyberAgent). Non-commercial use with attribution; derivatives keep this license.
-- **MediaPipe** assets in `weights/` (face landmarker, canonical face model): Apache-2.0, © Google.
+- **MediaPipe** assets in `weights/` (face landmarker, selfie multiclass segmenter, canonical
+  face model): Apache-2.0, © Google.
 - **Vendored on demand** (not tracked): [SSAT](https://github.com/Snowfallingplum/SSAT) (AAAI
   2022), [face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (MIT).
 - **Research this build stands on:** makeup-extract, Makeup Priors (CVPR 2024), CPM, MT dataset
