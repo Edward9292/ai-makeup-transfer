@@ -412,6 +412,48 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     step for fidelity is a diffusion engine (Stable-Makeup / FLUX-Makeup) behind
     `Engine.transfer_crop` on a GPU tier, or an image-edit API as a paid "HQ" mode.
 
+- **2026-11-14 — Diffusion engine (`diffusion.py`, branch `diffusion-engine`): Stable-Makeup on
+  SD 1.5 as a second backend. Reported: "the result [CSD-MT] is still not ideal — add a
+  diffusion way, generating a new image from my no-makeup photo and the target makeup."**
+  - **Why this model.** Of the diffusion candidates in `references.md` it is the only one that
+    fits the dev machine (M2, 16 GB): SD 1.5-sized (~2 B params with both ControlNets and
+    CLIP-L, ~6 GB in fp16), Apache-2.0, weights public. FLUX-Makeup needs 24 GB+.
+  - **What was built.** A port of the authors' inference path onto current `diffusers` /
+    `transformers` (upstream pins a bundled 2023 fork that no longer imports): SD 1.5 UNet with
+    16 makeup cross-attention processors (`to_k_SSR` / `to_v_SSR`), content + structure
+    ControlNets fed the empty-prompt embedding, fine-tuned CLIP-L makeup encoder (12 layers x
+    257 tokens -> resampler), DDIM 30 steps, CFG 1.6. SPIGA/facelib replaced by a MediaPipe ->
+    68-landmark map drawn with upstream's matplotlib recipe. All checkpoints load
+    `weights_only=True`. `engine.py` gained a backend registry (`--backend csd-mt|diffusion`),
+    a shared `FaceParser`, FFHQ-style **portrait** framing for the diffusion crop, and an LRU
+    cache of network outputs so strength/complexion sliders re-composite without re-sampling.
+  - **Composite kept.** The 512 px generation goes through the same delta composite, region
+    gate and occlusion mask as CSD-MT. That matters more here than for the GAN: raw output
+    changes eye colour, thins spectacle frames and redraws hair/background; the composite keeps
+    the wearer's own eyes, glasses, hair and everything outside the face.
+  - **Two fixes found by looking.** (1) *Identity drift* — on a real phone portrait, pure-noise
+    sampling (upstream behaviour) returned a visibly different person. Added `strength`:
+    below 1 the sampler starts from the noised **target** latents (img2img-style) and runs only
+    the remaining steps. Compared 0.6 / 0.75 / 0.9 / 1.0 by eye; **default 0.7** holds face
+    shape and shading while lipstick, shadow and blush still transfer fully, and is ~25%
+    faster. (2) *Reference in glasses* — the makeup encoder reads frames as part of the look
+    and draws rings on the target. `remove_glasses` inpaints the dark frame pixels of BiSeNet's
+    glasses class, protecting landmark eye/brow regions (the first version wiped the eyes and
+    brows too, which cost the target its brows). Best effort: a top bar that sits on the brows
+    survives as heavier brows.
+  - **Measured (M2, MPS, fp16, 512 px).** ~3.3 s/step; ~100 s per image at strength 1.0 / 30
+    steps, ~75 s at 0.7; first call adds ~40 s of model load. Quality vs CSD-MT on the same
+    pairs (`preprocess_out/diffusion/final.jpg`): makeup reads as pigment on skin — glossy
+    lips, soft-edged blush, blended shadow, filled brows — where the GAN gives a flatter tint.
+  - **App.** Try-on has a Quality switch: **Instant** (CSD-MT) / **Realistic** (diffusion, with
+    a progress bar), plus "Makeup weight" (guidance) and "Creative freedom" (strength)
+    sliders. Realistic is hidden when the weights are absent, so the free CPU Space is
+    unchanged.
+  - **Known limits.** Identity still shifts a little even at 0.7 (the model beautifies: smoother
+    skin, slightly reshaped lips); it is a 512 px generation, so on a 12 MP photo the face is
+    upsampled ~2.5x; ~1-2 min per image on Apple silicon; CUDA and CPU paths are implemented
+    but were not run on this machine.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain

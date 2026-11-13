@@ -11,8 +11,11 @@ Designed for a first-time visitor:
 2. **Create a look** — one photo of anyone wearing makeup -> saved look (CPU, a few seconds).
 3. **My looks** — pick a look, then try it on / download it / delete it.
 
-The transfer itself is the reference-based engine (``engine.py``); legacy UV-layer looks still
-apply through the same ``apply_look`` call.
+The transfer itself is the reference-based engine (``engine.py``), with two qualities on the
+Try-on screen: **Instant** (CSD-MT, about a second on CPU) and **Realistic** (Stable-Makeup
+diffusion, ``diffusion.py`` — generates the face anew, about a minute on an M-series Mac or a
+GPU; offered only where its weights are installed). Legacy UV-layer looks still apply through
+the same ``apply_look`` call.
 
 Uploads are handled as file *paths* (``gr.Image(type="filepath")``) to match the pipeline's
 path-based API. Pipeline outputs are OpenCV BGR arrays, converted to RGB for display here.
@@ -35,7 +38,8 @@ import numpy as np
 import gradio as gr
 
 from .apply import DEFAULT_REGION_PARAMS, apply_look, region_weights_uv
-from .engine import DEFAULT_COMPLEXION, create_look, reference_swatches
+from .diffusion import DEFAULT_GUIDANCE, DEFAULT_STRENGTH
+from .engine import DEFAULT_COMPLEXION, backend_available, create_look, reference_swatches
 from .engine import available as engine_available
 from .engine import missing_weights_message
 from .extract import _checker_preview
@@ -71,6 +75,14 @@ def _engine_available() -> tuple[bool, str]:
     except ImportError:
         return False, "PyTorch is not installed here (pip install torch)."
     return True, ""
+
+
+_INSTANT, _REALISTIC = "Instant", "Realistic (AI-generated, about a minute)"
+
+
+def _diffusion_available() -> tuple[bool, str]:
+    """Can the diffusion engine run here? (ok, reason-if-not)."""
+    return backend_available("diffusion")
 
 
 # --- small helpers ---------------------------------------------------------------------------
@@ -253,7 +265,9 @@ def do_select_look(evt: gr.SelectData):
     return (look, *_look_panel(look))
 
 
-def do_try(look, target_path, lips, eyes, brows, skin, complexion):
+def do_try(look, target_path, lips, eyes, brows, skin, complexion,
+           quality=_INSTANT, guidance=DEFAULT_GUIDANCE, strength=DEFAULT_STRENGTH,
+           progress=gr.Progress()):
     """Apply as soon as both halves are there; until then, say what's missing."""
     if not look or not target_path:
         hint = ("Choose a look in step 1." if not look else
@@ -263,19 +277,34 @@ def do_try(look, target_path, lips, eyes, brows, skin, complexion):
                  "brows": float(brows), "skin": float(skin)}
     if store.has_reference(look) and not (ok := _engine_available())[0]:
         return gr.skip(), gr.skip(), gr.skip(), f"**The makeup engine isn't set up here.** {ok[1]}"
+    diffusion = quality == _REALISTIC and store.has_reference(look)
+    if diffusion and not (ok := _diffusion_available())[0]:
+        return gr.skip(), gr.skip(), gr.skip(), f"**Realistic mode isn't set up here.** {ok[1]}"
+
+    def on_step(i, n):
+        progress(i / n, desc=f"Painting the look · step {i} of {n}")
+
     try:
-        result_bgr, debug = apply_look(look, target_path, strengths=strengths, store=store,
-                                       complexion=float(complexion))
+        if diffusion:
+            progress(0.0, desc="Warming up the diffusion model (first run takes longer)")
+        result_bgr, debug = apply_look(
+            look, target_path, strengths=strengths, store=store, complexion=float(complexion),
+            backend="diffusion" if diffusion else "csd-mt",
+            guidance=float(guidance) if diffusion else None,
+            strength=float(strength) if diffusion else None,
+            progress=on_step if diffusion else None,
+        )
     except ValueError:
         return (gr.skip(), gr.skip(), gr.skip(),
                 "**We couldn't find a face in that photo.** Try a clear, front-facing photo "
                 "in good light.")
     out_path = WEBAPP_OUT / f"makeup-{look}.png"
     cv2.imwrite(str(out_path), result_bgr)
+    how = " · generated with diffusion" if diffusion else ""
     return (gr.update(visible=False),
             gr.update(value=(_bgr2rgb(debug["target"]), _bgr2rgb(result_bgr)), visible=True),
             gr.update(value=str(out_path), visible=True),
-            f"Wearing **{_title(look)}** · drag the handle to compare")
+            f"Wearing **{_title(look)}**{how} · drag the handle to compare")
 
 
 # --- create-a-look callbacks ------------------------------------------------------------------
@@ -545,6 +574,7 @@ def build_demo() -> gr.Blocks:
     first = names[0] if names else None
     l0, e0, b0, s0, c0 = _look_strengths(first)
     engine_ok, engine_why = _engine_available()
+    diffusion_ok, diffusion_why = _diffusion_available()
 
     with gr.Blocks(title="Makeup Transfer") as demo:
         gr.HTML('<div id="topbar"><p class="brand">Makeup Transfer</p>'
@@ -585,6 +615,14 @@ def build_demo() -> gr.Blocks:
                         a_side = gr.ImageSlider(show_label=False, visible=False, type="numpy",
                                                 slider_position=50, height=520)
                         a_status = gr.Markdown(elem_classes="status")
+                        a_quality = gr.Radio(
+                            [_INSTANT, _REALISTIC] if diffusion_ok else [_INSTANT],
+                            value=_INSTANT, label="Quality",
+                            info=("Instant previews in a second. Realistic repaints the face "
+                                  "with a diffusion model for natural-looking makeup."
+                                  if diffusion_ok else
+                                  "Realistic (diffusion) mode isn't installed here — run the "
+                                  "app locally with `fetch_weights --diffusion` to get it."))
                         a_file = gr.DownloadButton("Download photo", variant="primary", size="lg",
                                                    visible=False, elem_classes="go")
                         with gr.Accordion("Adjust intensity", open=False):
@@ -598,6 +636,16 @@ def build_demo() -> gr.Blocks:
                                 0.0, 1.0, value=c0, step=0.05, label="Borrow their complexion",
                                 info="0 keeps your own skin tone; 1 takes the look's "
                                      "foundation and lighting too.")
+                            a_guidance = gr.Slider(
+                                1.0, 2.5, value=DEFAULT_GUIDANCE, step=0.05,
+                                label="Makeup weight (Realistic only)", visible=diffusion_ok,
+                                info="About 1.1 for a light look, 2 for a heavy one. "
+                                     "Changing it repaints the face.")
+                            a_strength = gr.Slider(
+                                0.4, 1.0, value=DEFAULT_STRENGTH, step=0.05,
+                                label="Creative freedom (Realistic only)", visible=diffusion_ok,
+                                info="Lower stays closer to your own face; higher lets the "
+                                     "model repaint more. Changing it repaints the face.")
                             a_reset = gr.Button("Reset to the original look", size="sm")
 
             # --- Create a look -------------------------------------------------------------
@@ -659,13 +707,14 @@ def build_demo() -> gr.Blocks:
         # --- wiring (all components exist now) ----------------------------------------------
         sliders = [a_lips, a_eyes, a_brows, a_skin, a_complexion]
         panel = [*sliders, a_swatch]
-        try_in = [look, a_target, *sliders]
+        try_in = [look, a_target, *sliders, a_quality, a_guidance, a_strength]
         try_out = [a_empty, a_side, a_file, a_status]
 
         a_gallery.select(do_select_look, None, [look, *panel]).then(do_try, try_in, try_out)
         a_target.change(do_try, try_in, try_out)
-        for s in sliders:
+        for s in (*sliders, a_guidance, a_strength):
             s.release(do_try, try_in, try_out)
+        a_quality.change(do_try, try_in, try_out)
         a_reset.click(_look_panel, look, panel).then(do_try, try_in, try_out)
 
         created = [look, a_gallery, l_gallery]

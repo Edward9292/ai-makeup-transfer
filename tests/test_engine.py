@@ -145,3 +145,10 @@ def test_create_look_then_apply_round_trip(tmp_path):
     assert not np.array_equal(result, debug["target"])
     swatches = engine.reference_swatches(ref)
     assert "lips" in swatches and swatches["lips"].startswith("#")
+
+
+def test_border_fade_is_zero_at_the_edge_and_one_inside():
+    f = engine._border_fade(200)
+    assert f.shape == (200, 200)
+    assert f[0, 100] < 0.1 and f[100, 0] < 0.1 and f[199, 199] < 0.1
+    assert f[100, 100] == 1.0 and f[20, 20] == 1.0

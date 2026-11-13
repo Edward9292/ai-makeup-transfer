@@ -18,6 +18,12 @@ mediapipe>=0.10.14          # Face Mesh (468 landmarks)
 torch>=2.2
 torchvision>=0.17
 
+# --- diffusion engine (optional: only for --backend diffusion / the app's "Realistic" mode) ---
+diffusers>=0.30
+transformers>=4.40
+accelerate>=0.30
+matplotlib>=3.8             # draws the face-structure conditioning image
+
 # --- demo UI (Phase 3) ---
 gradio>=4.0
 

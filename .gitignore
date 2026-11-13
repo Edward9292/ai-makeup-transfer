@@ -27,3 +27,5 @@ weights/prior_smoke.npz
 *.onnx
 *.tar
 .DS_Store
+weights/stablemakeup/
+*.bin

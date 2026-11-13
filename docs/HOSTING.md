@@ -53,9 +53,11 @@ TLS is provisioned automatically by Vercel once the domain is added to the proje
 
 ## Upgrade path (documented, deliberately not built)
 
-1. **HF PRO / ZeroGPU Space** → room for a diffusion-quality engine (Stable-Makeup on SD1.5,
-   or FLUX-Makeup on FLUX Kontext) behind the same `engine.py` crop → delta path, as an
-   opt-in "HQ" mode next to the instant CPU result. See `docs/references.md`.
+1. **HF PRO / ZeroGPU Space** → turns the app's **Realistic** quality on online. The
+   diffusion engine (`diffusion.py`, Stable-Makeup on SD 1.5) is built and runs locally; the
+   free CPU Space hides it because its ~7 GB of weights are not staged and a CPU run takes
+   minutes. On a GPU Space: add `diffusers transformers accelerate matplotlib` to the Space
+   requirements, stage `weights/stablemakeup/`, and wrap the try-on handler in `@spaces.GPU`.
 2. **Serverless GPU API** (Modal / Replicate / RunPod) + a custom upload/apply UI in the
    Next.js app → the "full web app" phase. Ballpark ~$0.001–0.01 per inference, cold starts
    apply. The site is already Next.js on Vercel so API routes can be added incrementally.

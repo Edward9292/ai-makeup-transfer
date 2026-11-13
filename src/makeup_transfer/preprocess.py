@@ -105,10 +105,21 @@ def _polygon_mask(points: np.ndarray, h: int, w: int) -> np.ndarray:
 
 
 def detect_face(image_path: str | Path, model_path: str | Path | None = None) -> FaceData:
-    """Run MediaPipe FaceLandmarker on one image and build region masks.
+    """Run MediaPipe FaceLandmarker on one image file and build region masks.
 
     Raises ``ValueError`` if no face is found, ``FileNotFoundError`` if image/model missing.
     """
+    path = Path(image_path)
+    image = cv2.imread(str(path))
+    if image is None:
+        raise FileNotFoundError(f"Could not read image: {path}")
+    return detect_face_bgr(image, model_path, name=str(path))
+
+
+def detect_face_bgr(
+    image: np.ndarray, model_path: str | Path | None = None, name: str = "image",
+) -> FaceData:
+    """``detect_face`` for an already-loaded BGR uint8 image."""
     # Imported lazily so the module can be imported without mediapipe present.
     import mediapipe as mp
     from mediapipe.tasks import python as mp_python
@@ -123,10 +134,7 @@ def detect_face(image_path: str | Path, model_path: str | Path | None = None) ->
             "face_landmarker/float16/1/face_landmarker.task"
         )
 
-    path = Path(image_path)
-    image = cv2.imread(str(path))
-    if image is None:
-        raise FileNotFoundError(f"Could not read image: {path}")
+    image = np.ascontiguousarray(image)
     h, w = image.shape[:2]
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -140,7 +148,7 @@ def detect_face(image_path: str | Path, model_path: str | Path | None = None) ->
         result = landmarker.detect(mp_image)
 
     if not result.face_landmarks:
-        raise ValueError(f"No face detected in {path}")
+        raise ValueError(f"No face detected in {name}")
 
     landmarks = _landmarks_to_pixels(result.face_landmarks[0], w, h)
 

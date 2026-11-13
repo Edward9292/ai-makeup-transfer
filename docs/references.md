@@ -22,11 +22,25 @@ kept for the legacy pipeline's history.
   by BiSeNet regions + the segmenter skin mask; complexion (uniform L / colour cast on skin)
   damped in Lab so the target keeps its own skin tone.
 
+### Stable-Makeup — diffusion engine (SIGGRAPH 2025) — SHIPPED as `--backend diffusion`
+- **Why:** the GAN edits pixels; this *generates* the made-up face, so makeup reads as pigment
+  on skin (gloss, soft blush edges, blended shadow) instead of a tint. SD 1.5-sized, so it fits
+  a 16 GB Apple-silicon laptop in fp16.
+- Authors: Yuxuan Zhang et al. · Paper: https://arxiv.org/abs/2403.07764
+- **GitHub:** https://github.com/Xiaojiu-z/Stable-Makeup (Apache-2.0) — weights: Google Drive
+  folder in its README (`pytorch_model{,_1,_2}.bin`), fetched by `fetch_weights --diffusion`.
+- Architecture: SD 1.5 UNet (frozen) + a **content encoder** and a **structure encoder** (both
+  ControlNets, fed the target face and a 68-landmark contour drawing, with the empty-prompt
+  text embedding) + a **detail-preserving makeup encoder** (fine-tuned CLIP ViT-L, 12 hidden
+  layers x 257 tokens -> one resampler block -> the UNet cross-attention through its own
+  key/value projections). DDIM, 30 steps, CFG 1.6 over the makeup tokens.
+- **How we use it (`diffusion.py`):** ported onto current `diffusers` (upstream bundles a 2023
+  fork); SPIGA + facelib landmark stack replaced by MediaPipe -> 68-point mapping, drawn with
+  upstream's exact matplotlib recipe; FFHQ-style *portrait* crop instead of the GAN's tight
+  crop; the 512 px output goes through the same delta composite / region gate / occlusion mask
+  as CSD-MT, which also keeps the wearer's own eyes, hair and background.
+
 ### Heavier tiers evaluated (not shipped — documented upgrade path)
-- **Stable-Makeup** (SIGGRAPH 2025, Apache-2.0): SD1.5 + two ControlNet-style encoders + CLIP
-  detail encoder; weights on Google Drive; fp16 CUDA only as shipped. Higher fidelity for
-  artistic looks but a discrete GPU and ~1 min/img. Would slot behind `Engine.transfer_crop`.
-  https://github.com/Xiaojiu-z/Stable-Makeup
 - **FLUX-Makeup** (2025, Apache-2.0 weights at `qihoo360/FLUX-Makeup`): DiT on FLUX.1-Kontext-dev
   (gated, non-commercial, 12B → 24 GB+ VRAM). Best reported fidelity; cloud-GPU only.
   https://github.com/360CVGroup/FLUX-Makeup

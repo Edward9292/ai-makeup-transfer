@@ -25,7 +25,9 @@ Run::
 
 from __future__ import annotations
 
+import hashlib
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -33,7 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .preprocess import FaceData, detect_face
+from .preprocess import FaceData, detect_face, detect_face_bgr
 
 _WEIGHTS = Path(__file__).resolve().parents[2] / "weights"
 CSDMT_WEIGHTS = _WEIGHTS / "csd_mt.pth"
@@ -98,11 +100,27 @@ def face_box(face: FaceData) -> tuple[int, int, int, int]:
     return int(left), int(top), int(right), int(bottom)
 
 
-def face_crop(face: FaceData) -> Crop:
-    """Square crop around the face with CSD-MT's margins, clamped to the photo."""
+# "portrait" framing (diffusion engine): FFHQ-like head-and-shoulders crop — the square's side
+# is this many face-widths, centred a little above the face-box centre.
+_PORTRAIT_SCALE = 1.8
+_PORTRAIT_UP = 0.10
+
+
+def face_crop(face: FaceData, framing: str = "tight") -> Crop:
+    """Square crop around the face, clamped to the photo.
+
+    ``"tight"`` uses CSD-MT's margins (face fills the frame); ``"portrait"`` is the looser
+    FFHQ-style framing Stable Diffusion face models are trained on.
+    """
     h, w = face.image.shape[:2]
     left, top, right, bottom = face_box(face)
     fh = bottom - top
+    if framing == "portrait":
+        size = int(min(_PORTRAIT_SCALE * (right - left), h, w))
+        cx, cy = (left + right) / 2.0, (top + bottom) / 2.0 - _PORTRAIT_UP * fh
+        sx = int(round(min(max(cx - size / 2.0, 0), w - size)))
+        sy = int(round(min(max(cy - size / 2.0, 0), h - size)))
+        return Crop(sx, sy, size)
     x0 = max(0, int(left - _WIDTH_RATIO * (right - left)))
     x1 = min(w, int(right + _WIDTH_RATIO * (right - left)))
     y0 = max(0, int(top - _UP_RATIO * fh))
@@ -133,31 +151,22 @@ def _device():
     return torch.device("cpu")
 
 
-class CSDMTEngine:
-    """CSD-MT generator + BiSeNet parser. Loaded once (``get_engine``), ~80 MB of weights."""
+class FaceParser:
+    """BiSeNet face parsing (19 CelebAMask-HQ classes). Shared by every backend."""
 
-    name = "csd-mt"
-
-    def __init__(self, weights: Path = CSDMT_WEIGHTS, bisenet: Path = BISENET_WEIGHTS) -> None:
+    def __init__(self, weights: Path = BISENET_WEIGHTS) -> None:
         import torch
 
-        from .vendor.csd_mt import BiSeNet, Generator
+        from .vendor.csd_mt import BiSeNet
 
-        if not weights.exists() or not bisenet.exists():
+        if not weights.exists():
             raise FileNotFoundError(missing_weights_message())
         self.device = _device()
         torch.set_num_threads(max(1, os.cpu_count() or 1))
+        self.net = BiSeNet(n_classes=19)
+        self.net.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True))
+        self.net.eval().to(self.device)
 
-        self.parser = BiSeNet(n_classes=19)
-        self.parser.load_state_dict(torch.load(bisenet, map_location="cpu"))
-        self.parser.eval().to(self.device)
-
-        self.gen = Generator(input_dim=3, parse_dim=10, ngf=16, device=self.device)
-        ckpt = torch.load(weights, map_location="cpu")
-        self.gen.load_state_dict(ckpt["gen"])
-        self.gen.eval().to(self.device)
-
-    # BiSeNet -------------------------------------------------------------------------------
     def parse(self, rgb: np.ndarray) -> np.ndarray:
         """19-class label map (uint8) at the input's resolution."""
         import torch
@@ -169,9 +178,40 @@ class CSDMTEngine:
             [0.229, 0.224, 0.225], np.float32)
         t = torch.from_numpy(np.transpose(x, (2, 0, 1))[None]).to(self.device)
         with torch.no_grad():
-            out = self.parser(t)[0]
+            out = self.net(t)[0]
         labels = out[0].argmax(0).cpu().numpy().astype(np.uint8)
         return cv2.resize(labels, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
+@lru_cache(maxsize=1)
+def get_parser() -> FaceParser:
+    return FaceParser()
+
+
+class CSDMTEngine:
+    """CSD-MT generator (~28 MB). Loaded once (``get_engine``). Fast, CPU-friendly, 256 px."""
+
+    name = "csd-mt"
+    size = NET_SIZE
+    framing = "tight"
+
+    def __init__(self, weights: Path = CSDMT_WEIGHTS) -> None:
+        import torch
+
+        from .vendor.csd_mt import Generator
+
+        if not weights.exists():
+            raise FileNotFoundError(missing_weights_message())
+        self.device = _device()
+        self.parser = get_parser()
+
+        self.gen = Generator(input_dim=3, parse_dim=10, ngf=16, device=self.device)
+        ckpt = torch.load(weights, map_location="cpu", weights_only=True)
+        self.gen.load_state_dict(ckpt["gen"])
+        self.gen.eval().to(self.device)
+
+    def parse(self, rgb: np.ndarray) -> np.ndarray:
+        return self.parser.parse(rgb)
 
     @staticmethod
     def _split_parse(parse: np.ndarray) -> np.ndarray:
@@ -215,7 +255,7 @@ class CSDMTEngine:
 
     def transfer_crop(
         self, target_rgb: np.ndarray, reference_rgb: np.ndarray,
-        target_parse: np.ndarray | None = None,
+        target_parse: np.ndarray | None = None, **_,
     ) -> np.ndarray:
         """Render the reference's makeup onto the target crop. Both RGB uint8 ``NET_SIZE``²."""
         import torch
@@ -235,6 +275,41 @@ class CSDMTEngine:
 @lru_cache(maxsize=1)
 def get_engine() -> CSDMTEngine:
     return CSDMTEngine()
+
+
+BACKENDS = ("csd-mt", "diffusion")
+
+
+def get_backend(backend: str = "csd-mt"):
+    """The engine object for a backend name: ``"csd-mt"`` (fast GAN, CPU) or ``"diffusion"``
+    (Stable-Makeup on SD 1.5 — generates the face anew; needs MPS/CUDA to be practical)."""
+    if backend == "csd-mt":
+        return get_engine()
+    if backend == "diffusion":
+        from . import diffusion
+
+        return diffusion.get_engine()
+    raise ValueError(f"Unknown backend '{backend}' (have: {', '.join(BACKENDS)})")
+
+
+def backend_available(backend: str = "csd-mt") -> tuple[bool, str]:
+    """(ok, reason-if-not) without loading any model."""
+    if not BISENET_WEIGHTS.exists():
+        return False, missing_weights_message()
+    if backend == "csd-mt":
+        return (True, "") if CSDMT_WEIGHTS.exists() else (False, missing_weights_message())
+    if backend == "diffusion":
+        from . import diffusion
+
+        if not diffusion.available():
+            return False, diffusion.missing_weights_message()
+        try:
+            import diffusers  # noqa: F401
+            import transformers  # noqa: F401
+        except ImportError:
+            return False, "The diffusion engine needs: pip install diffusers transformers accelerate matplotlib"
+        return True, ""
+    return False, f"Unknown backend '{backend}'"
 
 
 # --- region weights + composite ----------------------------------------------------------------
@@ -286,31 +361,77 @@ class TransferResult:
     image: np.ndarray                 # full-resolution BGR result
     target: np.ndarray                # original BGR photo
     crop: Crop
-    net_in: np.ndarray                # 256 px RGB target crop fed to the network
-    net_out: np.ndarray               # 256 px RGB network output
-    reference_crop: np.ndarray        # 256 px RGB reference crop
+    net_in: np.ndarray                # RGB target crop fed to the network (engine.size px)
+    net_out: np.ndarray               # RGB network output, same size
+    reference_crop: np.ndarray        # RGB reference crop, same size
     mask: np.ndarray                  # (crop.size, crop.size) float composite gate
+    backend: str = "csd-mt"
 
 
-def _reference_crop_rgb(reference: str | Path | np.ndarray, size: int) -> np.ndarray:
-    """A reference may be a photo path (detect + crop) or an already-cropped square RGB image
-    (a stored look), in which case it is just resized."""
+def _reference_crop_rgb(
+    reference: str | Path | np.ndarray, size: int, framing: str = "tight",
+) -> np.ndarray:
+    """The reference face, framed for an engine, as RGB uint8 ``size``².
+
+    A reference is a photo path or an RGB array (a stored look). Either way the face is
+    detected and cropped with the engine's own framing, so one stored look serves both the
+    tight-crop GAN and the portrait-crop diffusion model. An array with no detectable face is
+    centre-cropped and resized as-is.
+    """
     if isinstance(reference, np.ndarray):
-        img = reference
-        if img.shape[0] != img.shape[1]:
-            s = min(img.shape[:2])
-            y0, x0 = (img.shape[0] - s) // 2, (img.shape[1] - s) // 2
-            img = img[y0:y0 + s, x0:x0 + s]
-        interp = cv2.INTER_AREA if img.shape[0] > size else cv2.INTER_CUBIC
-        return cv2.resize(img, (size, size), interpolation=interp)
-    face = detect_face(reference)
-    bgr = crop_image(face.image, face_crop(face), size)
+        bgr = cv2.cvtColor(reference, cv2.COLOR_RGB2BGR)
+        try:
+            face = detect_face_bgr(bgr, name="reference")
+        except ValueError:
+            s_ = min(bgr.shape[:2])
+            y0, x0 = (bgr.shape[0] - s_) // 2, (bgr.shape[1] - s_) // 2
+            sq = bgr[y0:y0 + s_, x0:x0 + s_]
+            interp = cv2.INTER_AREA if s_ > size else cv2.INTER_CUBIC
+            return cv2.cvtColor(cv2.resize(sq, (size, size), interpolation=interp),
+                                cv2.COLOR_BGR2RGB)
+    else:
+        face = detect_face(reference)
+    bgr = crop_image(face.image, face_crop(face, framing), size)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+def remove_glasses(rgb: np.ndarray) -> np.ndarray:
+    """Paint spectacle frames out of a reference crop (inpainting from the surrounding skin).
+
+    A generative engine reads the *whole* reference as "the look", so frames come back drawn on
+    the target as dark rings. BiSeNet's glasses class marks the whole spectacle area, eyes and
+    brows included, so only its *dark* pixels outside the landmark eye/brow regions are treated
+    as frame — eye makeup behind the lenses survives. Best effort: a no-op when the reference
+    has no glasses or no detectable landmarks."""
+    parse = get_parser().parse(rgb)
+    glasses = (parse == _GLASSES).astype(np.uint8)
+    if glasses.sum() < 0.002 * glasses.size:
+        return rgb
+    try:
+        face = detect_face_bgr(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), name="reference")
+    except ValueError:
+        return rgb
+    px = max(rgb.shape[0] // 128, 1)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+    protect = np.zeros_like(glasses)
+    for name in ("left_eye", "right_eye", "left_brow", "right_brow"):
+        protect |= (face.masks[name] > 0).astype(np.uint8)
+    protect = cv2.dilate(protect, k, iterations=2)
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    skin = np.isin(parse, [_SKIN, _NOSE])
+    v_skin = float(np.median(gray[skin])) if skin.sum() > 50 else 160.0
+    frames = glasses & (gray < 0.55 * v_skin).astype(np.uint8) & (1 - protect)
+    if frames.sum() < 0.0005 * frames.size:
+        return rgb
+    frames = cv2.dilate(frames, k, iterations=2) & (1 - protect)
+    return cv2.inpaint(rgb, frames * 255, 3 * px, cv2.INPAINT_TELEA)
+
+
 def reference_from_photo(photo: str | Path, size: int = REFERENCE_SIZE) -> np.ndarray:
-    """Detect the face in a makeup photo and return its square RGB crop (what a look stores)."""
-    return _reference_crop_rgb(photo, size)
+    """Detect the face in a makeup photo and return its square RGB crop (what a look stores).
+    Stored with the looser *portrait* framing; each engine re-crops from it as it needs."""
+    return _reference_crop_rgb(photo, size, "portrait")
 
 
 def _damp_complexion(
@@ -364,7 +485,27 @@ def _damp_complexion(
     return new - base
 
 
+def _border_fade(size: int, frac: float = 0.06) -> np.ndarray:
+    """(size, size) ramp from 0 at the crop border to 1 inside. A tight crop can cut through
+    the forehead or jaw; without this the edit stops dead at the crop edge and shows as a band."""
+    n = max(int(round(frac * size)), 1)
+    ramp = np.minimum(np.arange(size, dtype=np.float32) + 0.5, n) / n
+    edge = np.minimum(ramp, ramp[::-1])
+    return np.minimum.outer(edge, edge)
+
+
 DEFAULT_COMPLEXION = 0.4   # keep 40% of the reference's overall skin-tone shift by default
+
+# Network outputs keyed by (backend, inputs, sampling options). The composite is cheap and the
+# network is not (a minute for diffusion), so moving a strength slider must not re-run it.
+_NET_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_NET_CACHE_MAX = 8
+
+
+def _cache_key(backend: str, net_in: np.ndarray, ref: np.ndarray, opts: dict) -> tuple:
+    h = hashlib.sha1(net_in.tobytes())
+    h.update(ref.tobytes())
+    return (backend, h.hexdigest(), tuple(sorted(opts.items())))
 
 
 def transfer_makeup(
@@ -374,41 +515,72 @@ def transfer_makeup(
     strengths: dict[str, float] | None = None,
     complexion: float = DEFAULT_COMPLEXION,
     occlusion: bool = True,
-    engine: CSDMTEngine | None = None,
+    backend: str = "csd-mt",
+    steps: int | None = None,
+    guidance: float | None = None,
+    strength: float | None = None,
+    seed: int = 0,
+    progress=None,
+    engine=None,
 ) -> TransferResult:
     """Put the reference's makeup on the target photo at full resolution.
 
-    ``strengths`` scales the makeup per region (``DEFAULT_STRENGTHS`` keys); values above 1
-    exaggerate, 0 removes. ``complexion`` (0..1) is how much of the reference's *overall*
-    skin-tone shift to keep (see ``_damp_complexion``). ``occlusion`` gates the result by the
-    segmenter's skin mask so hair and hands crossing the face stay clean.
+    ``backend`` picks the network: ``"csd-mt"`` (fast GAN) or ``"diffusion"`` (Stable-Makeup;
+    ``steps`` / ``guidance`` / ``strength`` / ``seed`` / ``progress`` apply to it only). ``strengths`` scales
+    the makeup per region (``DEFAULT_STRENGTHS`` keys); values above 1 exaggerate, 0 removes.
+    ``complexion`` (0..1) is how much of the reference's *overall* skin-tone shift to keep (see
+    ``_damp_complexion``). ``occlusion`` gates the result by the segmenter's skin mask so hair
+    and hands crossing the face stay clean.
     """
-    engine = engine or get_engine()
+    engine = engine or get_backend(backend)
+    parser = get_parser()
     face = target if isinstance(target, FaceData) else detect_face(target)
     strengths = {**DEFAULT_STRENGTHS, **(strengths or {})}
+    size = engine.size
 
-    crop = face_crop(face)
+    crop = face_crop(face, engine.framing)
     ys, xs = crop.slice()
     crop_bgr = face.image[ys, xs]
-    net_in = cv2.cvtColor(crop_image(face.image, crop, NET_SIZE), cv2.COLOR_BGR2RGB)
-    ref_rgb = _reference_crop_rgb(reference, NET_SIZE)
+    net_in = cv2.cvtColor(crop_image(face.image, crop, size), cv2.COLOR_BGR2RGB)
+    ref_rgb = _reference_crop_rgb(reference, size, engine.framing)
+    if engine.name != "csd-mt":
+        ref_rgb = remove_glasses(ref_rgb)
 
-    # Parse once at crop resolution (capped for speed); the network gets its own 256 px copy.
-    parse_full = engine.parse(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
-    parse_net = cv2.resize(parse_full, (NET_SIZE, NET_SIZE), interpolation=cv2.INTER_NEAREST)
-    net_out = engine.transfer_crop(net_in, ref_rgb, target_parse=parse_net)
+    # Parse once at crop resolution; the GAN gets its own network-size copy.
+    parse_full = parser.parse(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+
+    opts = {}
+    if engine.name != "csd-mt":
+        opts = {"seed": int(seed)}
+        if steps is not None:
+            opts["steps"] = int(steps)
+        if guidance is not None:
+            opts["guidance"] = float(guidance)
+        if strength is not None:
+            opts["strength"] = float(strength)
+    key = _cache_key(engine.name, net_in, ref_rgb, opts)
+    if (net_out := _NET_CACHE.get(key)) is not None:
+        _NET_CACHE.move_to_end(key)
+    else:
+        parse_net = cv2.resize(parse_full, (size, size), interpolation=cv2.INTER_NEAREST)
+        landmarks = (face.landmarks - np.array([crop.x0, crop.y0], np.float32)) * (size / crop.size)
+        net_out = engine.transfer_crop(net_in, ref_rgb, target_parse=parse_net,
+                                       landmarks=landmarks, progress=progress, **opts)
+        _NET_CACHE[key] = net_out
+        while len(_NET_CACHE) > _NET_CACHE_MAX:
+            _NET_CACHE.popitem(last=False)
 
     # Delta composite: only the makeup *change* is upsampled and added to the untouched photo.
     delta = net_out.astype(np.float32) - net_in.astype(np.float32)
     delta = cv2.resize(delta, (crop.size, crop.size), interpolation=cv2.INTER_CUBIC)
-    scale = crop.size / NET_SIZE
+    scale = crop.size / size
     if scale > 1.5:
-        # Upsampled 256 px pixels would otherwise show as blocky edges on lip/liner borders.
+        # Upsampled network pixels would otherwise show as blocky edges on lip/liner borders.
         delta = cv2.GaussianBlur(delta, (0, 0), 0.5 * scale)
     delta = cv2.cvtColor(delta, cv2.COLOR_RGB2BGR)
     delta = _damp_complexion(crop_bgr, delta, parse_full, complexion)
 
-    gate = edit_mask(parse_full) * region_weights(parse_full, strengths)
+    gate = edit_mask(parse_full) * region_weights(parse_full, strengths) * _border_fade(crop.size)
     if occlusion and (skin := face.skin_visibility) is not None:
         gate = gate * skin[ys, xs]
 
@@ -416,7 +588,8 @@ def transfer_makeup(
     region = crop_bgr.astype(np.float32) + gate[..., None] * delta
     out[ys, xs] = np.clip(region, 0, 255).astype(np.uint8)
     return TransferResult(image=out, target=face.image, crop=crop, net_in=net_in,
-                          net_out=net_out, reference_crop=ref_rgb, mask=gate)
+                          net_out=net_out, reference_crop=ref_rgb, mask=gate,
+                          backend=engine.name)
 
 
 # --- looks ------------------------------------------------------------------------------------
@@ -439,12 +612,11 @@ def create_look(photo: str | Path, name: str, *, store=None, notes: str = ""):
     return ref, store.save_reference(name, ref, meta)
 
 
-def reference_swatches(reference_rgb: np.ndarray, engine: CSDMTEngine | None = None) -> dict[str, str]:
+def reference_swatches(reference_rgb: np.ndarray) -> dict[str, str]:
     """Mean colour (``#rrggbb``) of the reference's lips, eye band, brows and skin — the look's
     palette, for display. Empty dict if the parser finds no face."""
-    engine = engine or get_engine()
     rgb = _reference_crop_rgb(reference_rgb, NET_SIZE)
-    parse = engine.parse(rgb)
+    parse = get_parser().parse(rgb)
     px = max(NET_SIZE // 64, 1)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (12 * px + 1, 12 * px + 1))
     eyes_open = np.isin(parse, [_L_EYE, _R_EYE]).astype(np.uint8)
@@ -476,6 +648,14 @@ def _main() -> None:
     ap.add_argument("--complexion", type=float, default=DEFAULT_COMPLEXION,
                     help="0..1: how much of the reference's overall skin-tone shift to keep")
     ap.add_argument("--no-occlusion", action="store_true")
+    ap.add_argument("--backend", default="csd-mt", choices=BACKENDS,
+                    help="csd-mt = fast GAN (CPU); diffusion = Stable-Makeup on SD 1.5")
+    ap.add_argument("--steps", type=int, default=None, help="diffusion: denoising steps")
+    ap.add_argument("--guidance", type=float, default=None,
+                    help="diffusion: makeup guidance (1.1 light .. 2.0 heavy; default 1.6)")
+    ap.add_argument("--denoise", type=float, default=None,
+                    help="diffusion: 1.0 generates from noise; lower anchors to your photo")
+    ap.add_argument("--seed", type=int, default=0, help="diffusion: noise seed")
     args = ap.parse_args()
 
     strengths = {}
@@ -486,15 +666,22 @@ def _main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     res = transfer_makeup(args.target, args.reference, strengths=strengths,
-                          complexion=args.complexion, occlusion=not args.no_occlusion)
+                          complexion=args.complexion, occlusion=not args.no_occlusion,
+                          backend=args.backend, steps=args.steps, guidance=args.guidance,
+                          strength=args.denoise, seed=args.seed,
+                          progress=lambda i, n: print(f"\r  step {i}/{n}", end="", flush=True))
     stem = f"{Path(args.target).stem}_x_{Path(args.reference).stem}"
+    if args.backend != "csd-mt":
+        print()
+        stem += f"_{args.backend}"
     cv2.imwrite(str(out / f"{stem}.png"), res.image)
-    s = NET_SIZE
+    s = 384 if args.backend != "csd-mt" else NET_SIZE
+    rs = lambda im: cv2.resize(im, (s, s), interpolation=cv2.INTER_AREA)  # noqa: E731
     strip = np.hstack([
-        cv2.cvtColor(res.net_in, cv2.COLOR_RGB2BGR),
-        cv2.cvtColor(res.reference_crop, cv2.COLOR_RGB2BGR),
-        cv2.cvtColor(res.net_out, cv2.COLOR_RGB2BGR),
-        cv2.resize(res.image[res.crop.slice()], (s, s), interpolation=cv2.INTER_AREA),
+        rs(cv2.cvtColor(res.net_in, cv2.COLOR_RGB2BGR)),
+        rs(cv2.cvtColor(res.reference_crop, cv2.COLOR_RGB2BGR)),
+        rs(cv2.cvtColor(res.net_out, cv2.COLOR_RGB2BGR)),
+        rs(res.image[res.crop.slice()]),
         cv2.cvtColor((cv2.resize(res.mask, (s, s)) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR),
     ])
     cv2.imwrite(str(out / f"{stem}_strip.png"), strip)

@@ -217,12 +217,20 @@ def apply_look(
     composite: str = "delta",
     occlusion: bool = True,
     complexion: float | None = None,
+    backend: str = "csd-mt",
+    steps: int | None = None,
+    guidance: float | None = None,
+    strength: float | None = None,
+    seed: int = 0,
+    progress=None,
 ):
     """Apply a saved look to a target photo. Returns ``(result_bgr, debug)``.
 
     Engine looks (``store.has_reference``) go through ``engine.transfer_makeup``; ``complexion``
     (0..1, how much of the reference's skin tone to take) applies to them only and defaults to
-    the look's own setting. The parameters below describe the legacy UV-layer path.
+    the look's own setting. ``backend`` picks the network for engine looks — ``"csd-mt"`` (fast)
+    or ``"diffusion"`` (Stable-Makeup; ``steps`` / ``guidance`` / ``strength`` / ``seed`` / ``progress`` are its
+    sampling options). The parameters below describe the legacy UV-layer path.
 
     ``composite="delta"`` (default) harmonizes against the double-resample blur of the
     image -> UV -> image round trip: only the makeup *change* (blended - target UV texture,
@@ -246,8 +254,10 @@ def apply_look(
         if complexion is None:
             complexion = float(bp.get("complexion", DEFAULT_COMPLEXION))
         res = transfer_makeup(target_image, reference, strengths=region_strengths,
-                              complexion=complexion, occlusion=occlusion)
-        debug = {"target": res.target, "net_in": res.net_in, "net_out": res.net_out,
+                              complexion=complexion, occlusion=occlusion, backend=backend,
+                              steps=steps, guidance=guidance, strength=strength, seed=seed,
+                              progress=progress)
+        debug = {"target": res.target, "backend": res.backend, "net_in": res.net_in, "net_out": res.net_out,
                  "reference": res.reference_crop, "mask": res.mask, "crop": res.crop}
         return res.image, debug
 
@@ -309,6 +319,13 @@ def _main() -> None:
                     help="delta = grain-preserving harmonized composite (default)")
     ap.add_argument("--no-occlusion", action="store_true",
                     help="don't mask out hair/hands covering the target's face")
+    ap.add_argument("--backend", default="csd-mt", choices=["csd-mt", "diffusion"],
+                    help="engine looks: csd-mt = fast GAN, diffusion = Stable-Makeup (slow, best)")
+    ap.add_argument("--steps", type=int, default=None, help="diffusion: denoising steps")
+    ap.add_argument("--guidance", type=float, default=None, help="diffusion: makeup guidance")
+    ap.add_argument("--denoise", type=float, default=None,
+                    help="diffusion: 1.0 generates from noise; lower stays closer to the photo")
+    ap.add_argument("--seed", type=int, default=0, help="diffusion: noise seed")
     ap.add_argument("--complexion", type=float, default=None,
                     help="engine looks: 0..1 share of the reference's skin tone to take")
     args = ap.parse_args()
@@ -319,7 +336,8 @@ def _main() -> None:
     result, debug = apply_look(
         args.look, args.target, strengths=_parse_strengths(args.strength),
         uv_size=args.size, composite=args.composite, occlusion=not args.no_occlusion,
-        complexion=args.complexion,
+        complexion=args.complexion, backend=args.backend, steps=args.steps,
+        guidance=args.guidance, strength=args.denoise, seed=args.seed,
     )
 
     stem = f"{args.look}_on_{Path(args.target).stem}"
