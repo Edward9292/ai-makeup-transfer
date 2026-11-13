@@ -1,24 +1,24 @@
 import Pipeline from "@/components/Pipeline";
 import { GITHUB_URL, HF_SPACE_PAGE, HF_SPACE_URL } from "@/lib/links";
 
-/* Pigment chips are sampled from the real layer.png alpha-weighted pixels,
-   so a look's swatches are literally the colors it will paint on. */
+/* Pigment chips are the mean lip / lid / skin colours parsed off each reference face,
+   so a look's swatches are literally the colours the engine reads from it. */
 const LOOKS = [
   {
     code: "002386 · 03",
     name: "Bright red lip",
-    swatches: ["#C05658", "#84605D", "#BB938D"],
+    swatches: ["#BD5759", "#A88179", "#C8A196"],
     image: "/results/ffhq-002386-03_side_by_side.png",
-    alt: "The same face before and after the bright red lip look is applied",
-    note: "Lip, brow and lid — applied to a face that never wore it.",
+    alt: "A man in glasses before and after the bright red lip look is applied",
+    note: "Lip, lid and brow — on a face that never wore it, glasses left alone.",
   },
   {
     code: "003125 · 02",
     name: "Crimson & smoke",
     swatches: ["#C5454F", "#574A4B", "#A98882"],
     image: "/results/ffhq-003125-02_side_by_side.png",
-    alt: "A second face before and after the crimson and smoke look is applied",
-    note: "A second identity, same pipeline, no per-photo tuning.",
+    alt: "A freckled face before and after the crimson and smoke look is applied",
+    note: "A second identity, same engine, no per-photo tuning. Freckles survive.",
   },
 ];
 
@@ -56,15 +56,15 @@ export default function Home() {
         {/* ---------------- hero ---------------- */}
         <section className="hero">
           <div className="wrap">
-            <p className="kicker">Makeup as a file</p>
+            <p className="kicker">Makeup from any photo</p>
             <h1>
               One look.
               <br />
               Any face.
             </h1>
             <p className="hero-sub">
-              Lift a makeup look off a photo, save it as a transparent layer, and wear it on
-              anyone — matched to their own skin.
+              Borrow the makeup from any photo and wear it on anyone — their own skin,
+              lighting and complexion stay theirs.
             </p>
             <div className="cta-row">
               <a className="btn btn-primary" href="#demo">
@@ -87,12 +87,11 @@ export default function Home() {
               </div>
               <div className="specimen-cell">
                 <img
-                  className="on-checker"
-                  src="/results/ffhq-002386-03_layer_preview.png"
-                  alt="The extracted makeup, shown as a transparent layer over a checkerboard"
+                  src="/results/ffhq-002386-03_reference.png"
+                  alt="The saved look: the reference face the engine reads the makeup from"
                 />
                 <p className="step">
-                  <span>2</span> Saved layer
+                  <span>2</span> Saved look
                   <Swatches colors={LOOKS[0].swatches} />
                 </p>
               </div>
@@ -123,16 +122,22 @@ export default function Home() {
 
             <ol className="steps">
               <li>
-                <h3>Capture</h3>
-                <p>Give it one photo, or a with/without pair for the cleanest result.</p>
+                <h3>Pick</h3>
+                <p>One photo of anyone wearing makeup you like. That face becomes the look.</p>
               </li>
               <li>
-                <h3>Separate</h3>
-                <p>The makeup is written out as a transparent PNG. The face is not in it.</p>
+                <h3>Transfer</h3>
+                <p>
+                  A makeup-transfer network reads the makeup off that face and paints it onto
+                  yours — matched region to region, whatever the pose.
+                </p>
               </li>
               <li>
                 <h3>Wear</h3>
-                <p>Apply that layer to any face, per region, with intensity you control.</p>
+                <p>
+                  Only the change is composited back onto your full-resolution photo, per
+                  region, with intensity and complexion you control.
+                </p>
               </li>
             </ol>
 
@@ -140,9 +145,11 @@ export default function Home() {
               <summary>See the full pipeline</summary>
               <Pipeline />
               <p className="disclosure-note">
-                Both photos are unwrapped into a shared UV texture space, where makeup becomes a
-                per-texel difference. Applying reverses the trip and composites only the
-                difference, so skin grain survives. No makeup GAN is trained.
+                The network (CSD-MT, CVPR 2024) works on a 256-pixel face crop. Rather than
+                returning that crop, we add its makeup <em>difference</em> onto the untouched
+                photo, gated by face parsing and a skin mask, so grain, hair and glasses
+                survive. A complexion control keeps the reference&apos;s foundation from
+                lightening your skin.
               </p>
             </details>
           </div>
@@ -152,9 +159,9 @@ export default function Home() {
         <section id="looks" className="section section-tint">
           <div className="wrap">
             <p className="kicker">Looks</p>
-            <h2>Three looks, four faces.</h2>
+            <h2>Three looks, three faces.</h2>
             <p className="lede">
-              Every extracted look applied to every test face — pale, freckled, olive, male.
+              Every look applied to every test face — pale, freckled, male in glasses.
             </p>
 
             <div className="look-grid">
@@ -182,7 +189,7 @@ export default function Home() {
             <figure className="matrix">
               <img
                 src="/results/verification_grid.png"
-                alt="Matrix of three extracted looks applied to four different faces"
+                alt="Matrix of three looks applied to three different faces"
                 loading="lazy"
               />
               <figcaption>Every look, every face. Left column is where each look came from.</figcaption>
@@ -196,7 +203,8 @@ export default function Home() {
             <p className="kicker">Live demo</p>
             <h2>Take a look for a spin.</h2>
             <p className="lede">
-              Extract a look, apply it to a new face, and adjust each region. Free, in the browser.
+              Make a look from any photo, try it on a new face, and adjust each region. Free, in
+              the browser, a few seconds per face.
             </p>
             <div className="demo-frame">
               <iframe
@@ -223,11 +231,28 @@ export default function Home() {
             <p className="kicker">Behind the build</p>
             <h2>What worked, and what didn&apos;t.</h2>
             <p className="lede">
-              The project ran on go/no-go gates. Three passed, one didn&apos;t, and that one ships
-              turned off.
+              The project ran on go/no-go gates. Three passed, one didn&apos;t — and the first
+              design was replaced once real results came back flat.
             </p>
 
             <div className="log">
+              <details open>
+                <summary>
+                  <span className="log-title">Replacing the extractor with a transfer network</span>
+                  <span className="tag tag-pass">Shipped</span>
+                </summary>
+                <p>
+                  The original design lifted makeup off a with/without pair as a transparent
+                  layer. On real photos the layer kept only a faint lip tint — shadow, liner and
+                  blush were filtered out as lighting — so results read as a colour wash. A
+                  reference-based network (CSD-MT) now decides what is makeup; the
+                  full-resolution compositing, occlusion masking and per-region controls from the
+                  first design were kept around it. Two fixes came from looking: a reference in
+                  glasses leaked its frames as eye shadow (spectacles are now treated as
+                  background), and the reference&apos;s foundation whitened faces (a complexion
+                  control damps the uniform skin shift in Lab, keeping blush).
+                </p>
+              </details>
               <details>
                 <summary>
                   <span className="log-title">Keeping shadows out of the layer</span>

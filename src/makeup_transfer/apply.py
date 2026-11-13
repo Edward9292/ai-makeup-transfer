@@ -1,6 +1,11 @@
 """Phase 2: apply a saved makeup look to a target photo (``apply.py``).
 
-Pipeline: load look (UV RGBA layer + ``meta.json``) -> detect target face -> unwrap target into
+**Engine looks** (``reference.png``, the current default) are rendered by ``engine.py``: the
+transfer network reads the makeup off the stored reference face and paints it onto the target,
+composited at full resolution. ``apply_look`` dispatches there first; everything below is the
+**legacy UV-layer path**, kept so older looks (``layer.png``) still apply.
+
+Legacy pipeline: load look (UV RGBA layer + ``meta.json``) -> detect target face -> unwrap target into
 the same canonical UV space -> blend the layer over the target texture with **per-region blend
 modes** -> re-project to the photo and composite.
 
@@ -20,6 +25,9 @@ Per-region modes (BUILD_PLAN Phase 2 — one global blend is physically wrong):
 
 Which region gets which mode + strength lives in the look's ``meta.json`` (``blend_params``),
 so it is editable per look; ``--strength region=x`` overrides at apply time.
+
+The final composite is gated by the target's skin mask (``occlusion.py``), so makeup lands on
+skin only — hair falling over a brow or eye stays hair instead of being tinted through.
 
 Run::
 
@@ -207,18 +215,43 @@ def apply_look(
     strengths: dict[str, float] | None = None,
     uv_size: int = UV_SIZE,
     composite: str = "delta",
+    occlusion: bool = True,
+    complexion: float | None = None,
 ):
     """Apply a saved look to a target photo. Returns ``(result_bgr, debug)``.
+
+    Engine looks (``store.has_reference``) go through ``engine.transfer_makeup``; ``complexion``
+    (0..1, how much of the reference's skin tone to take) applies to them only and defaults to
+    the look's own setting. The parameters below describe the legacy UV-layer path.
 
     ``composite="delta"`` (default) harmonizes against the double-resample blur of the
     image -> UV -> image round trip: only the makeup *change* (blended - target UV texture,
     both through the same round trip, so resampling softness cancels) is projected and added
     onto the untouched original photo, preserving the target's full-resolution skin grain
     under the makeup. ``composite="plain"`` is the naive alpha-over for comparison.
+
+    ``occlusion=True`` (default) keeps the makeup off anything covering the target's face —
+    hair, a hand, glasses — via the segmenter mask (see ``occlusion.py``); set it to ``False``
+    for the previous, occlusion-blind composite.
     """
     store = store or LookStore()
-    layer = store.load_layer(look_name)
     meta = store.load_meta(look_name)
+    if (reference := store.load_reference(look_name)) is not None:
+        from .engine import DEFAULT_COMPLEXION, transfer_makeup
+
+        bp = meta.blend_params or {}
+        region_strengths = {k: float(v.get("strength", 1.0))
+                            for k, v in bp.get("regions", {}).items()}
+        region_strengths.update(strengths or {})
+        if complexion is None:
+            complexion = float(bp.get("complexion", DEFAULT_COMPLEXION))
+        res = transfer_makeup(target_image, reference, strengths=region_strengths,
+                              complexion=complexion, occlusion=occlusion)
+        debug = {"target": res.target, "net_in": res.net_in, "net_out": res.net_out,
+                 "reference": res.reference_crop, "mask": res.mask, "crop": res.crop}
+        return res.image, debug
+
+    layer = store.load_layer(look_name)
     regions, skin_lab = _resolve_params(meta, strengths)
 
     if layer.shape[0] != uv_size:
@@ -231,6 +264,11 @@ def apply_look(
     h, w = face.image.shape[:2]
     alpha_img, _ = project(layer[..., 3], face.landmarks, h, w)
     a = (alpha_img.astype(np.float32) / 255.0)[..., None]
+    # The mesh spans the face oval regardless of what is actually in front of it, so hair
+    # falling over a brow or eye would get painted with that region's color. Gate the
+    # composite by the target's own skin mask, leaving occluders untouched.
+    if occlusion and (skin := face.skin_visibility) is not None:
+        a = a * skin[..., None]
     blended_img, _ = project(blended_uv, face.landmarks, h, w)
     if composite == "delta":
         base_img, _ = project(uv_t, face.landmarks, h, w)
@@ -243,7 +281,7 @@ def apply_look(
         raise ValueError(f"Unknown composite '{composite}' (delta|plain)")
 
     debug = {"uv_target": uv_t, "uv_blended": blended_uv, "alpha_img": alpha_img,
-             "target": face.image}
+             "target": face.image, "alpha_gated": (a[..., 0] * 255).astype(np.uint8)}
     return result, debug
 
 
@@ -269,6 +307,10 @@ def _main() -> None:
                     help="override a region strength, e.g. --strength lips=0.8 (repeatable)")
     ap.add_argument("--composite", default="delta", choices=["delta", "plain"],
                     help="delta = grain-preserving harmonized composite (default)")
+    ap.add_argument("--no-occlusion", action="store_true",
+                    help="don't mask out hair/hands covering the target's face")
+    ap.add_argument("--complexion", type=float, default=None,
+                    help="engine looks: 0..1 share of the reference's skin tone to take")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -276,7 +318,8 @@ def _main() -> None:
 
     result, debug = apply_look(
         args.look, args.target, strengths=_parse_strengths(args.strength),
-        uv_size=args.size, composite=args.composite,
+        uv_size=args.size, composite=args.composite, occlusion=not args.no_occlusion,
+        complexion=args.complexion,
     )
 
     stem = f"{args.look}_on_{Path(args.target).stem}"

@@ -89,7 +89,7 @@ export default function Pipeline() {
       <svg
         viewBox="0 0 980 300"
         role="img"
-        aria-label="Pipeline: photos are unwrapped to UV space, differenced into an RGBA layer, then warped and blended onto a target face"
+        aria-label="Pipeline: a reference face is saved as a look; the target face is cropped, parsed, run through the transfer network, and the makeup difference is composited back at full resolution"
         className="pipeline-svg"
       >
         <defs>
@@ -100,13 +100,13 @@ export default function Pipeline() {
 
         <Lane
           y={46}
-          title="Extract"
+          title="Create"
           nodes={[
-            { x: xs[0], label: ["photo pair", "(or one photo)"] },
+            { x: xs[0], label: ["one photo", "anyone, with makeup"] },
             { x: xs[1], label: ["468 landmarks", "MediaPipe"] },
-            { x: xs[2], label: ["UV unwrap", "canonical mesh"] },
-            { x: xs[3], label: ["illumination-aware", "difference"] },
-            { x: xs[4], label: ["RGBA layer", "layer.png"], accent: true, checker: true },
+            { x: xs[2], label: ["face crop", "network framing"] },
+            { x: xs[3], label: ["palette", "lips · lids · skin"] },
+            { x: xs[4], label: ["saved look", "reference.png"], accent: true },
           ]}
         />
 
@@ -125,12 +125,12 @@ export default function Pipeline() {
 
         <Lane
           y={200}
-          title="Apply"
+          title="Try on"
           nodes={[
-            { x: xs[0], label: ["layer + target", "photo"], accent: true },
-            { x: xs[1], label: ["UV warp", "to target"] },
-            { x: xs[2], label: ["per-region blend", "multiply · soft-light"] },
-            { x: xs[3], label: ["delta composite", "grain-preserving"] },
+            { x: xs[0], label: ["look + your", "photo"], accent: true },
+            { x: xs[1], label: ["crop + parse", "BiSeNet regions"] },
+            { x: xs[2], label: ["CSD-MT", "makeup transfer"] },
+            { x: xs[3], label: ["delta composite", "full-res, skin-gated"] },
             { x: xs[4], label: ["result", "result.png"] },
           ]}
         />

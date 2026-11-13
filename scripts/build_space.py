@@ -2,8 +2,9 @@
 
 Usage:  python scripts/build_space.py  [dest]
 
-The Space is torch-free: only the CPU tabs' code + assets are copied. SSAT/BiSeNet
-weights and third_party/ never ship (the GPU tab is disabled by app.py's runtime gate).
+The Space runs the reference-based makeup engine on CPU (CSD-MT + BiSeNet, ~80 MB of
+weights, 1-4 s per transfer). Those two ``.pth`` files are copied from ``weights/`` — run
+``python -m makeup_transfer.fetch_weights`` first. ``third_party/`` never ships.
 """
 from __future__ import annotations
 
@@ -15,7 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = Path(__file__).resolve().parent / "space_assets"
 
 SEED_LOOKS = ["ffhq-002386-03", "ffhq-003125-02", "ffhq-003417-05"]
-WEIGHTS = ["face_landmarker.task", "canonical_face_model.obj"]
+WEIGHTS = [
+    "face_landmarker.task",
+    "canonical_face_model.obj",
+    "selfie_multiclass_256x256.tflite",  # occlusion masking (hair/hands/glasses), CPU
+    "csd_mt.pth",                        # makeup engine (engine.py), CPU
+    "bisenet_79999_iter.pth",            # face parsing for the engine, CPU
+]
 
 ENTRY_SHIM = '''"""HF Space entrypoint: run the packaged Gradio app."""
 import sys
@@ -23,12 +30,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from makeup_transfer.app import build_demo
+from makeup_transfer.app import LAUNCH_KWARGS, build_demo
 
 demo = build_demo()
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(**LAUNCH_KWARGS)
 '''
 
 
@@ -43,7 +50,10 @@ def stage(dest: Path) -> None:
     # assets
     (dest / "weights").mkdir()
     for w in WEIGHTS:
-        shutil.copy2(ROOT / "weights" / w, dest / "weights" / w)
+        src = ROOT / "weights" / w
+        if not src.exists():
+            raise SystemExit(f"Missing {src} — run: python -m makeup_transfer.fetch_weights")
+        shutil.copy2(src, dest / "weights" / w)
     for look in SEED_LOOKS:
         shutil.copytree(ROOT / "looks" / look, dest / "looks" / look)
     shutil.copytree(ROOT / "data" / "ffhq_makeup", dest / "data" / "ffhq_makeup",

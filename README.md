@@ -1,17 +1,26 @@
 # AI Makeup Transfer
 
-Extract makeup from a face *with* makeup as a **translucent RGBA layer in 3D UV space**, then
-apply it **realistically** to a face *without* makeup (skin tone shows through, so the same look
-adapts per person).
+Take **any photo of someone wearing makeup** and put that makeup on **any other face**,
+realistically: the wearer keeps their own skin texture, lighting and complexion; only the
+makeup travels.
 
-> **Status:** NN core complete (extract → apply → demo), packaged for the web.
-> Site: **https://makeup-transfer.edwardlin.dev** · live demo: Hugging Face Space (CPU) ·
+> **Status:** reference-based engine live (2026-11-13) — see "Design" below for what changed and
+> why. Site: **https://makeup-transfer.edwardlin.dev** · live demo: Hugging Face Space (CPU) ·
 > hosting details: `docs/HOSTING.md`. Storage/sharing is still **faked with local files**
 > (`./looks/`); a real backend is a documented upgrade path, not built. See `docs/BUILD_PLAN.md`.
 
 ## Design in one line
-`with-makeup + without-makeup (same person)` → **extract** UV makeup layer (RGBA) → **apply** to any
-target face via UV warp + skin-tone-aware blend + delta composite.
+`reference photo (anyone, with makeup) + target photo` → **CSD-MT** transfer network renders the
+makeup onto a 256 px face crop → the **makeup delta** is composited back onto the full-resolution
+photo, gated by face parsing + a skin-visibility mask, with per-region strengths and a
+*complexion* control that keeps the target's own skin tone.
+
+**Why the rewrite.** The first design extracted makeup as an RGBA layer in UV space by differencing
+a with/without pair of the *same* person, then blended that layer onto targets. In practice the
+difference matte kept only the strongest signal (a lip tint) and threw eye shadow, liner and
+blush away as "illumination", so applied looks read as a flat color wash. A network trained on
+makeup/no-makeup pairs is far better at deciding what is makeup; we keep our own full-resolution
+compositing because the network's 256 px output alone would soften the photo.
 
 ## Repo layout
 ```
@@ -19,30 +28,31 @@ docs/            BUILD_PLAN.md, HOSTING.md, references.md
 site/            static Next.js showcase site (Vercel root dir = site/)
 scripts/         build_space.py — stages the Hugging Face Space demo into space_build/
 src/makeup_transfer/
+  engine.py      ⭐ reference-based transfer: crop → CSD-MT → full-res delta composite
+  vendor/csd_mt/ vendored CSD-MT generator + BiSeNet parser (inference code only)
+  fetch_weights.py  downloads the engine's two .pth files into weights/
   preprocess.py  face detect / landmarks / region masks   (MediaPipe)
   occlusion.py   skin vs. hair/hands/glasses mask          (MediaPipe segmenter)
-  uv_unwrap.py   image ↔ canonical UV texture (MediaPipe canonical mesh, no 3DMM)
   storage.py     LOCAL-FILE fake storage (swappable interface for future backend)
-  extract.py     [Phase 1]   pair → makeup_layer.png (RGBA, UV space)      ✅
-  removal.py     [Phase 2.5] SSAT makeup removal → pseudo-bare face        ✅ (GPU)
-  apply.py       [Phase 2]   layer + target → result.png                   ✅
-  priors.py      [Phase 4]   PCA makeup prior  ⚠️ opt-in (--prior; gate failed, see BUILD_PLAN)
-  app.py         [Phase 3]   Gradio web demo                               ✅
-weights/         MediaPipe landmarker + segmenter + canonical mesh + fitted PCA prior (tracked)
+  apply.py       look + target → result.png (engine looks; legacy UV-layer looks still work)
+  app.py         Gradio web demo
+  uv_unwrap.py, extract.py, removal.py, priors.py   legacy UV-layer pipeline (kept, not default)
+weights/         MediaPipe assets (tracked) + engine weights csd_mt.pth / bisenet_79999_iter.pth (fetched)
 data/ffhq_makeup/  FFHQ-Makeup sample pairs (CC BY-NC-SA, see Licenses below)
-looks/           saved looks: <name>/layer.png + meta.json (3 samples tracked)
-third_party/     NOT tracked — cloned on demand for the GPU single-photo path (see below)
+looks/           saved looks: <name>/reference.png + meta.json (3 samples tracked)
+third_party/     NOT tracked — cloned on demand for the legacy GPU single-photo path
 ```
 
 ## Setup
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements.txt            # includes torch (CPU is fine)
+python -m makeup_transfer.fetch_weights    # ~80 MB: CSD-MT generator + BiSeNet parser
 ```
 
-Torch is only needed for the **single-photo (GPU) path**; everything else — pair extraction,
-apply, the web demo's CPU tabs — runs without it.
+Set `MAKEUP_DEVICE=mps` (Apple) or `cuda` to run the network on a GPU; CPU takes 1–4 s per
+transfer on a laptop, which is what the hosted demo uses.
 
 The MediaPipe assets under `weights/` are tracked, so setup is just the pip install. If one is
 ever missing, re-fetch it with:
@@ -64,23 +74,27 @@ python -m makeup_transfer.app
 ```
 
 Open the printed URL (default http://127.0.0.1:7860). The demo is three steps in the order you
-work in them — **Try a look** (pick a saved look + a face → before/after), **Make a look**
-(pair of photos → saved layer), **Your looks** (browse / export / delete). All three run on CPU
-with the assets already in this repo; try applying `ffhq-002386-03` to
+work in them — **Try on** (pick a look + a face → before/after, with lips / eyes / brows / skin
+and *complexion* sliders), **Create a look** (one photo of anyone wearing makeup → saved look),
+**My looks** (browse / export / delete). All three run on CPU; try `ffhq-002386-03` on
 `data/ffhq_makeup/003417_bare.jpg`.
 
-### Optional: the single-photo (GPU) path
-
-Lives in the "Only have one photo?" panel under **Make a look**. Needs a CUDA GPU plus two
-untracked third-party pieces (the panel is disabled with a note until they exist):
+### Command line
 
 ```powershell
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-git clone https://github.com/Snowfallingplum/SSAT third_party/SSAT          # weights ship in-repo
-git clone https://github.com/zllrunning/face-parsing.PyTorch third_party/face-parsing.PyTorch
-# BiSeNet weights (79999_iter.pth) → third_party/face-parsing.PyTorch/res/cp/
-#   (Google Drive link in that repo's README; or: gdown 154JgKpzCPW82qINcVieuPH3fZ2e0P812)
+# any photo with makeup → any other photo, in one go
+python -m makeup_transfer.engine data/ffhq_makeup/003417_bare.jpg data/ffhq_makeup/002386_makeup_03.jpg `
+    --out preprocess_out/engine --strength lips=1.2 --complexion 0.3
+# or apply a saved look
+python -m makeup_transfer.apply ffhq-002386-03 data/ffhq_makeup/003417_bare.jpg
 ```
+
+### Legacy UV-layer pipeline
+
+`extract.py` / `uv_unwrap.py` / `priors.py` / `removal.py` are the previous pair-difference
+design (see `docs/BUILD_PLAN.md` for its history and why it was replaced). Looks saved by it
+(`layer.png`) still apply through `apply_look`; the SSAT single-photo path still needs CUDA and
+the untracked `third_party/` clones described in BUILD_PLAN.
 
 ## Website + hosted demo
 
@@ -99,9 +113,15 @@ git clone https://github.com/zllrunning/face-parsing.PyTorch third_party/face-pa
   (CyberAgent). Non-commercial use with attribution; derivatives keep this license.
 - **MediaPipe** assets in `weights/` (face landmarker, selfie multiclass segmenter, canonical
   face model): Apache-2.0, © Google.
-- **Vendored on demand** (not tracked): [SSAT](https://github.com/Snowfallingplum/SSAT) (AAAI
-  2022), [face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch) (MIT).
-- **Research this build stands on:** makeup-extract, Makeup Priors (CVPR 2024), CPM, MT dataset
-  (research-scoped samples) — see `docs/references.md`.
+- **CSD-MT** (the makeup engine; vendored inference code in `src/makeup_transfer/vendor/csd_mt/`
+  and the fetched `weights/csd_mt.pth`): **CC BY-NC-SA 4.0** — © Zhaoyang Sun et al.,
+  [Snowfallingplum/CSD-MT](https://github.com/Snowfallingplum/CSD-MT) (CVPR 2024). Non-commercial.
+- **BiSeNet face parsing** (`weights/bisenet_79999_iter.pth`, vendored model code): MIT —
+  [zllrunning/face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch).
+- **Vendored on demand** (not tracked, legacy path only): [SSAT](https://github.com/Snowfallingplum/SSAT)
+  (AAAI 2022).
+- **Research this build stands on:** CSD-MT, makeup-extract, Makeup Priors (CVPR 2024), CPM,
+  Stable-Makeup, FLUX-Makeup — see `docs/references.md`.
 
-GPU: developed against an RTX 4060 Ti (8 GB). CPU works for everything except SSAT removal.
+Developed on an Apple M2 (CPU) and an RTX 4060 Ti (8 GB). The engine runs on CPU everywhere;
+only the legacy SSAT removal needs CUDA.

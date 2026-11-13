@@ -5,3 +5,7 @@ scipy>=1.11
 scikit-image>=0.22
 mediapipe>=0.10.14
 gradio>=6.0
+# makeup engine (CSD-MT + BiSeNet) runs on CPU; the CPU wheel keeps the Space build small
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+torchvision>=0.17

@@ -1,33 +1,27 @@
 {
   "name": "ffhq-003125-02",
-  "created": "2026-07-02T14:15:31.495721+00:00",
+  "created": "2026-11-13T14:05:10.819666+00:00",
   "source_with": "data/ffhq_makeup/003125_makeup_02.jpg",
-  "source_without": "data/ffhq_makeup/003125_bare.jpg",
-  "blend": "per-region",
+  "source_without": null,
+  "blend": "engine",
   "blend_params": {
-    "skin_lab_mean": [
-      71.35,
-      7.86,
-      15.08
-    ],
     "regions": {
       "lips": {
-        "mode": "multiply",
+        "strength": 1.0
+      },
+      "eyes": {
         "strength": 1.0
       },
       "brows": {
-        "mode": "multiply",
-        "strength": 0.9
-      },
-      "eyes": {
-        "mode": "softlight",
         "strength": 1.0
       },
       "skin": {
-        "mode": "softlight",
         "strength": 1.0
       }
-    }
+    },
+    "complexion": 0.4
   },
+  "source_mode": "reference",
+  "engine": "csd-mt",
   "notes": ""
 }

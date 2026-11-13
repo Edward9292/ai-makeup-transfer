@@ -16,7 +16,7 @@ Quick check::
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -64,6 +64,8 @@ class FaceData:
     image: np.ndarray            # original BGR image (H, W, 3) uint8
     landmarks: np.ndarray        # (468, 2) float32 pixel coords
     masks: dict[str, np.ndarray] # region name -> (H, W) uint8 mask {0,255}
+    _skin: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _skin_done: bool = field(default=False, repr=False, compare=False)
 
     @property
     def height(self) -> int:
@@ -72,6 +74,20 @@ class FaceData:
     @property
     def width(self) -> int:
         return self.image.shape[1]
+
+    @property
+    def skin_visibility(self) -> np.ndarray | None:
+        """(H, W) float32 in [0, 1]: 1 where exposed facial skin, 0 where an occluder (hair,
+        hand, glasses) sits in front of the face. ``None`` when the segmenter weight is absent.
+
+        Computed lazily and cached — callers that only need landmarks never pay for it.
+        """
+        if not self._skin_done:
+            from .occlusion import skin_visibility
+
+            self._skin = skin_visibility(self.image)
+            self._skin_done = True
+        return self._skin
 
 
 def _landmarks_to_pixels(landmarks, w: int, h: int) -> np.ndarray:

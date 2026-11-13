@@ -195,6 +195,18 @@ def unwrap(image: np.ndarray, landmarks: np.ndarray, uv_size: int = 512):
     return uv_texture, vis
 
 
+def _mirror_weights(visibility: np.ndarray) -> np.ndarray:
+    """Per-pixel weight on a pixel's *own* value vs its mirror, from relative visibility."""
+    flip_vis = visibility[:, ::-1]
+    total = visibility + flip_vis
+    return np.where(total > 1e-6, visibility / np.maximum(total, 1e-6), 0.5)[..., None]
+
+
+def _blend_mirror(uv_texture: np.ndarray, w: np.ndarray) -> np.ndarray:
+    blended = w * uv_texture.astype(np.float32) + (1.0 - w) * uv_texture[:, ::-1].astype(np.float32)
+    return blended.astype(uv_texture.dtype)
+
+
 def mirror_fill(uv_texture: np.ndarray, visibility: np.ndarray):
     """Blend each UV pixel with its left/right mirror, weighted by relative visibility.
 
@@ -202,12 +214,27 @@ def mirror_fill(uv_texture: np.ndarray, visibility: np.ndarray):
     ``(filled_texture, filled_visibility)``.
     """
     mirror_permutation()  # raises if the chart is not symmetric
-    flip_tex = uv_texture[:, ::-1]
-    flip_vis = visibility[:, ::-1]
-    total = visibility + flip_vis
-    w = np.where(total > 1e-6, visibility / np.maximum(total, 1e-6), 0.5)[..., None]
-    filled = w * uv_texture.astype(np.float32) + (1.0 - w) * flip_tex.astype(np.float32)
-    return filled.astype(uv_texture.dtype), np.maximum(visibility, flip_vis)
+    w = _mirror_weights(visibility)
+    return _blend_mirror(uv_texture, w), np.maximum(visibility, visibility[:, ::-1])
+
+
+def mirror_fill_pair(
+    uv_a: np.ndarray, uv_b: np.ndarray, vis_a: np.ndarray, vis_b: np.ndarray,
+):
+    """Mirror-fill two textures of the same face with **one shared** weight map.
+
+    Filling each shot independently is wrong for a *pair*: a pixel that gets filled from the
+    mirror in one shot but kept in the other compares two different bits of face, and the
+    resulting mismatch shows up in the difference as makeup. Driving both fills from the pair's
+    joint visibility (``min``) means every UV pixel is either kept in both shots or taken from
+    the same mirrored location in both, so the comparison stays like-for-like.
+
+    Returns ``(filled_a, filled_b, filled_visibility)``.
+    """
+    mirror_permutation()  # raises if the chart is not symmetric
+    vis = np.minimum(vis_a, vis_b)
+    w = _mirror_weights(vis)
+    return _blend_mirror(uv_a, w), _blend_mirror(uv_b, w), np.maximum(vis, vis[:, ::-1])
 
 
 def project(uv_layer: np.ndarray, landmarks: np.ndarray, height: int, width: int):

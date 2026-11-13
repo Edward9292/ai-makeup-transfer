@@ -17,6 +17,9 @@ Illumination handling (the #1 risk per BUILD_PLAN.md), cheap first cut:
   without erasing local color changes.
 - **UV symmetry suppression** — makeup is mostly left/right symmetric, cast shadows are not;
   the matte is pulled toward the min of itself and its mirror (weight ``--sym``).
+- **Occlusion masking** — hair/hands/glasses crossing the face oval are unwrapped as if they
+  were skin and move between the two shots, so the difference reads them as makeup. The
+  segmenter mask (``occlusion.py``) is folded into each shot's visibility before mirror-fill.
 
 The proper fix (fitting the makeup-priors PCA model instead of differencing) is a planned
 upgrade; this module keeps the steps separable so that swap stays local.
@@ -38,7 +41,7 @@ import numpy as np
 from .preprocess import detect_face
 from .priors import PRIOR_LAMBDA
 from .storage import LookStore
-from .uv_unwrap import mirror_fill, region_masks_uv, unwrap
+from .uv_unwrap import mirror_fill, mirror_fill_pair, region_masks_uv, unwrap
 
 UV_SIZE = 512
 
@@ -61,11 +64,33 @@ def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return t * t * (3.0 - 2.0 * t)
 
 
-def unwrap_to_uv(image_path: str | Path, uv_size: int = UV_SIZE):
-    """detect -> unwrap -> mirror-fill one photo. Returns ``(face, uv_texture, visibility)``."""
+def unwrap_to_uv(
+    image_path: str | Path,
+    uv_size: int = UV_SIZE,
+    *,
+    occlusion: bool = True,
+    mirror: bool = True,
+):
+    """detect -> unwrap -> mirror-fill one photo. Returns ``(face, uv_texture, visibility)``.
+
+    Hair (or a hand, or glasses) crossing the face oval is unwrapped as if it were skin, so the
+    occluder mask is folded into the *visibility* map: occluded pixels are then filled from the
+    clean mirrored half where possible, and what stays occluded is gated out of the matte later.
+    ``occlusion=False`` returns the raw geometric visibility (the pre-occlusion behavior).
+
+    ``mirror=False`` returns the un-filled texture — what ``extract_look`` wants, because a pair
+    must be mirror-filled *jointly* (``uv_unwrap.mirror_fill_pair``).
+    """
     face = detect_face(image_path)
     uv_tex, vis = unwrap(face.image, face.landmarks, uv_size)
-    uv_tex, vis = mirror_fill(uv_tex, vis)
+    if occlusion:
+        from .occlusion import skin_visibility_uv
+
+        uv_skin = skin_visibility_uv(face, uv_size)
+        if uv_skin is not None:
+            vis = vis * uv_skin
+    if mirror:
+        uv_tex, vis = mirror_fill(uv_tex, vis)
     return face, uv_tex, vis
 
 
@@ -77,6 +102,38 @@ def _normalized_luminance(lab: np.ndarray, face_mask: np.ndarray, sigma: float) 
     return L / base * float(base[face_mask].mean())
 
 
+def skin_gate_uv(skin_with: np.ndarray | None, skin_without: np.ndarray | None):
+    """Where is the *pair* trustworthy? ``min`` of the two photos' UV skin masks, or ``None``.
+
+    A pixel is only comparable between the two shots if neither shot had something in front of
+    it — hair over the with-makeup forehead is not makeup, it is hair.
+    """
+    if skin_with is None or skin_without is None:
+        return None
+    return np.minimum(skin_with, skin_without)
+
+
+def repair_occluded_alpha(alpha: np.ndarray, skin_pair: np.ndarray | None) -> np.ndarray:
+    """Replace alpha under occluders with its left/right mirror; zero it where both are covered.
+
+    ``mirror_fill_pair`` repairs the *texture* under an occluder, but the repair is only as
+    good as the mask: a strand the 256px segmenter clipped still leaks a little difference into
+    the matte. So the matte itself is repaired at the end, taking its value from the mirrored
+    half — where the pair *is* comparable — and leaning on the same left/right symmetry the
+    ``--sym`` shadow suppression already assumes. Where a covered pixel's mirror is covered too
+    nothing is knowable, and the alpha goes to zero.
+    """
+    if skin_pair is None:
+        return alpha
+    flip_skin = skin_pair[:, ::-1]
+    total = skin_pair + flip_skin
+    w = np.where(total > 1e-6, skin_pair / np.maximum(total, 1e-6), 0.5)
+    repaired = w * alpha + (1.0 - w) * alpha[:, ::-1]
+    # Both halves occluded -> no evidence either way. (x2, like the visibility gate: a
+    # half-confident pixel is still usable.)
+    return repaired * np.clip(np.maximum(skin_pair, flip_skin) * 2.0, 0.0, 1.0)
+
+
 def extract_layer(
     uv_with: np.ndarray,
     vis_with: np.ndarray,
@@ -84,8 +141,12 @@ def extract_layer(
     vis_without: np.ndarray,
     *,
     sym: float = 0.5,
+    skin_pair: np.ndarray | None = None,
 ):
     """Build an RGBA makeup layer from an aligned UV texture pair.
+
+    ``skin_pair`` (see ``skin_gate_uv``) keeps hair/hands out of the matte and out of the
+    bare-skin color estimate; ``None`` disables occlusion handling entirely.
 
     Returns ``(layer_rgba, skin_lab_mean, debug)``: the (S, S, 4) uint8 layer (RGB channel
     order), the mean Lab of the *real* bare skin (used by the apply-time blend), and a dict of
@@ -95,13 +156,18 @@ def extract_layer(
     px = s // 100  # ~1% of texture as a blur/morphology unit
     masks = region_masks_uv(s)
     face = masks["face"] > 0
+    # Statistics over the face (white-balance shift, bare-skin color) must not be polluted by
+    # whatever was covering it; fall back to the whole chart if the mask leaves too little.
+    stat = face & (skin_pair > 0.5) if skin_pair is not None else face
+    if stat.sum() < 0.1 * face.sum():
+        stat = face
 
     lab_m = _rgb_lab(uv_with)
     lab_b = _rgb_lab(uv_without)
 
     # --- chromaticity difference, white-balance drift removed globally --------------------
     d_ab_raw = lab_m[..., 1:] - lab_b[..., 1:]
-    shift = np.median(d_ab_raw[face], axis=0)  # robust: most of the face is *not* makeup-shifted
+    shift = np.median(d_ab_raw[stat], axis=0)  # robust: most of the face is *not* makeup-shifted
     d_ab = np.linalg.norm(d_ab_raw - shift, axis=2)
 
     # --- Retinex-normalized luminance difference ------------------------------------------
@@ -119,6 +185,7 @@ def extract_layer(
     gate = cv2.GaussianBlur(gate.astype(np.float32) / 255.0, (0, 0), float(px))
     alpha *= gate
     alpha *= np.clip(np.minimum(vis_with, vis_without) * 2.0, 0.0, 1.0)
+    alpha = repair_occluded_alpha(alpha, skin_pair)
 
     # --- shadow suppression via UV left/right symmetry -------------------------------------
     alpha = (1.0 - sym) * alpha + sym * np.minimum(alpha, alpha[:, ::-1])
@@ -131,7 +198,7 @@ def extract_layer(
     hard_excl = (masks["mouth"] | masks["left_eye"] | masks["right_eye"]) > 0
     alpha[hard_excl] = 0.0
 
-    skin_lab_mean = lab_b[face].mean(axis=0)
+    skin_lab_mean = lab_b[stat].mean(axis=0)
     rgb = cv2.cvtColor(uv_with, cv2.COLOR_BGR2RGB)
     layer = np.dstack([rgb, (alpha * 255).astype(np.uint8)])
 
@@ -140,6 +207,8 @@ def extract_layer(
         "d_dark": np.clip(d_dark / ALPHA_HI, 0, 1),
         "alpha": alpha,
     }
+    if skin_pair is not None:
+        debug["skin_pair"] = skin_pair
     return layer, skin_lab_mean, debug
 
 
@@ -155,21 +224,38 @@ def extract_look(
     prior=None,
     residual: float = 0.0,
     lam: float = PRIOR_LAMBDA,
+    occlusion: bool = True,
 ):
     """Full extraction: photo pair -> UV pair -> RGBA layer -> saved look.
 
     ``prior`` (a ``MakeupPrior``, or a path to one) switches the alpha from the Phase-1
     chromaticity difference to the Phase-4 prior fit. ``None`` keeps the baseline unchanged.
+    ``occlusion=False`` disables hair/hand masking (both the texture repair in ``unwrap_to_uv``
+    and the matte's skin gate).
 
     Returns ``(layer_rgba, skin_lab_mean, debug)`` (also persisted via the store).
     """
     from .apply import DEFAULT_REGION_PARAMS
+    from .occlusion import skin_visibility_uv
 
-    _, uv_m, vis_m = unwrap_to_uv(with_image, uv_size)
-    _, uv_b, vis_b = unwrap_to_uv(without_image, uv_size)
+    # Occlusion on: unwrap raw and mirror-fill the two shots *together* (see mirror_fill_pair).
+    # Off: the original per-shot fill, so --no-occlusion reproduces the pre-occlusion pipeline.
+    face_m, uv_m, vis_m = unwrap_to_uv(with_image, uv_size, occlusion=occlusion,
+                                       mirror=not occlusion)
+    face_b, uv_b, vis_b = unwrap_to_uv(without_image, uv_size, occlusion=occlusion,
+                                       mirror=not occlusion)
+    skin_pair = None
+    if occlusion:
+        uv_m, uv_b, vis_pair = mirror_fill_pair(uv_m, uv_b, vis_m, vis_b)
+        vis_m = vis_b = vis_pair
+        skin_pair = skin_gate_uv(
+            skin_visibility_uv(face_m, uv_size), skin_visibility_uv(face_b, uv_size),
+        )
 
     if prior is None:
-        layer, skin_lab, debug = extract_layer(uv_m, vis_m, uv_b, vis_b, sym=sym)
+        layer, skin_lab, debug = extract_layer(
+            uv_m, vis_m, uv_b, vis_b, sym=sym, skin_pair=skin_pair,
+        )
         method = "difference"
     else:
         from .priors import MakeupPrior, extract_layer_prior
@@ -179,6 +265,7 @@ def extract_look(
         # sym defaults OFF under the prior: rejecting shadow is the prior's job now.
         layer, skin_lab, debug = extract_layer_prior(
             uv_m, vis_m, uv_b, vis_b, prior=prior, residual=residual, lam=lam, sym=0.0,
+            skin_pair=skin_pair,
         )
         method = "prior"
 
@@ -218,6 +305,7 @@ def extract_look_single(
     prior=None,
     residual: float = 0.0,
     lam: float = PRIOR_LAMBDA,
+    occlusion: bool = True,
 ):
     """Single-photo extraction: SSAT removal synthesizes the bare face (Phase 2.5),
     then the ordinary pair pipeline runs on the pseudo-pair. The pseudo-bare is
@@ -237,7 +325,7 @@ def extract_look_single(
     return extract_look(
         with_image, pseudo_path, look_name,
         uv_size=uv_size, sym=sym, store=store, source_mode="single",
-        prior=prior, residual=residual, lam=lam,
+        prior=prior, residual=residual, lam=lam, occlusion=occlusion,
     )
 
 
@@ -278,6 +366,8 @@ def _main() -> None:
                     help="gated high-frequency residual weight w in [0,1] (0 = prior only)")
     ap.add_argument("--prior-lambda", type=float, default=PRIOR_LAMBDA,
                     help="ridge on the makeup coefficients (higher = stronger prior)")
+    ap.add_argument("--no-occlusion", action="store_true",
+                    help="don't mask out hair/hands covering either face")
     ap.add_argument("--apply-to", default=None,
                     help="optional target photo to re-apply the layer to (verification)")
     args = ap.parse_args()
@@ -291,6 +381,7 @@ def _main() -> None:
             reference=args.ref,
             pseudo_out=out / f"{args.look}_pseudo_bare.png",
             prior=args.prior, residual=args.residual, lam=args.prior_lambda,
+            occlusion=not args.no_occlusion,
         )
         print(f"Single-photo mode: pseudo-bare written to {out / f'{args.look}_pseudo_bare.png'}")
     else:
@@ -298,6 +389,7 @@ def _main() -> None:
             args.with_image, args.without_image, args.look,
             uv_size=args.size, sym=args.sym,
             prior=args.prior, residual=args.residual, lam=args.prior_lambda,
+            occlusion=not args.no_occlusion,
         )
     store = LookStore()
     print(f"Saved look '{args.look}' to {store.root / args.look}")

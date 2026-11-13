@@ -17,8 +17,10 @@ TLS is provisioned automatically by Vercel once the domain is added to the proje
 
 ## Limits at this tier (accepted, stated on the site)
 
-- **No GPU online.** The single-photo extraction tab (SSAT removal) needs CUDA; on the CPU
-  Space it is visible but disabled with a "run locally" note (`app.py` gates it at build time).
+- **CPU only, and that is enough.** The reference-based engine (CSD-MT + BiSeNet, ~80 MB,
+  CPU torch wheel) runs every tab on the free Space at 1–4 s per transfer. The Space build
+  copies the two `.pth` files from `weights/`, so run `python -m makeup_transfer.fetch_weights`
+  before `scripts/build_space.py`; they go up through HF's normal git push (<100 MB each).
 - **Space sleeps** after ~48h of inactivity; first visit after that cold-starts (up to a
   minute). Noted next to the demo embed.
 - **Vercel Hobby is non-commercial** use only — fine for a portfolio/research showcase.
@@ -37,8 +39,8 @@ TLS is provisioned automatically by Vercel once the domain is added to the proje
    git init && git remote add origin https://huggingface.co/spaces/<user>/makeup-transfer
    git add -A && git commit -m "demo" && git push origin main --force
    ```
-   Verify in a browser: extract from the bundled sample pair → save → apply to a sample
-   target → download; confirm the single-photo tab shows its disabled note.
+   Verify in a browser: create a look from a bundled sample photo → save → try it on a
+   sample face → download; a transfer should take a few seconds on CPU Basic.
 3. **Vercel — import the repo.** New Project → import the GitHub repo →
    **Root Directory = `site/`** (framework auto-detects Next.js) → Deploy. Check the
    `*.vercel.app` preview renders.
@@ -51,8 +53,9 @@ TLS is provisioned automatically by Vercel once the domain is added to the proje
 
 ## Upgrade path (documented, deliberately not built)
 
-1. **HF PRO / ZeroGPU Space** → turns the GPU single-photo tab on online. Requires adding
-   SSAT + BiSeNet weights to the Space (via HF LFS) and removing the CPU gate's trigger.
+1. **HF PRO / ZeroGPU Space** → room for a diffusion-quality engine (Stable-Makeup on SD1.5,
+   or FLUX-Makeup on FLUX Kontext) behind the same `engine.py` crop → delta path, as an
+   opt-in "HQ" mode next to the instant CPU result. See `docs/references.md`.
 2. **Serverless GPU API** (Modal / Replicate / RunPod) + a custom upload/apply UI in the
    Next.js app → the "full web app" phase. Ballpark ~$0.001–0.01 per inference, cold starts
    apply. The site is already Next.js on Vercel so API routes can be added incrementally.

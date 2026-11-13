@@ -26,3 +26,4 @@ weights/prior_smoke.npz
 *.pth
 *.onnx
 *.tar
+.DS_Store

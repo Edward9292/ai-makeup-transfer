@@ -276,16 +276,19 @@ def extract_layer_prior(
     residual: float = 0.0,
     lam: float = PRIOR_LAMBDA,
     sym: float = 0.0,
+    skin_pair: np.ndarray | None = None,
 ):
     """Prior-fitted replacement for ``extract.extract_layer``. Same return contract.
 
     ``residual`` (the ``w`` knob) adds back the high-frequency part of what the fit could not
     explain, gated to where the prior says makeup actually is. ``residual=0`` is prior-only.
     ``sym`` defaults to 0 here: shadow rejection is the prior's job now, not symmetry's.
+    ``skin_pair`` is the occlusion gate (see ``extract.skin_gate_uv``); hair is outside the
+    prior's model of makeup, so it must be masked here too.
     """
     import cv2
 
-    from .extract import ALPHA_HI, ALPHA_LO, _rgb_lab, _smoothstep
+    from .extract import ALPHA_HI, ALPHA_LO, _rgb_lab, _smoothstep, repair_occluded_alpha
     from .uv_unwrap import region_masks_uv
 
     s = uv_with.shape[0]
@@ -336,6 +339,7 @@ def extract_layer_prior(
     gate = cv2.GaussianBlur(gate.astype(np.float32) / 255.0, (0, 0), float(px))
     alpha *= gate
     alpha *= np.clip(np.minimum(vis_with, vis_without) * 2.0, 0.0, 1.0)
+    alpha = repair_occluded_alpha(alpha, skin_pair)
 
     if sym > 0.0:
         alpha = (1.0 - sym) * alpha + sym * np.minimum(alpha, alpha[:, ::-1])
@@ -350,7 +354,10 @@ def extract_layer_prior(
     lab_m = _rgb_lab(uv_with)
     bare_est = lab_m - makeup_full
     face = masks["face"] > 0
-    skin_lab_mean = bare_est[face].mean(axis=0)
+    stat = face & (skin_pair > 0.5) if skin_pair is not None else face
+    if stat.sum() < 0.1 * face.sum():  # mask too aggressive to average over — use the chart
+        stat = face
+    skin_lab_mean = bare_est[stat].mean(axis=0)
 
     rgb = cv2.cvtColor(uv_with, cv2.COLOR_BGR2RGB)
     layer = np.dstack([rgb, (alpha * 255).astype(np.uint8)])

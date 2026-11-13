@@ -1,8 +1,41 @@
 # References — Papers & Code to Implement
 
-Curated for the "makeup as a translucent RGBA layer, in 3D UV space" design.
-**Primary** = directly implements our core idea. **Reuse** = pretrained building block.
-**Reference/optional** = useful comparison or future phase.
+**2026-11-13 update:** the shipped engine is now **CSD-MT** (below). The sections after it are
+the original curation for the "makeup as a translucent RGBA layer, in 3D UV space" design,
+kept for the legacy pipeline's history.
+
+## ⭐ SHIPPED — reference-based transfer engine
+
+### CSD-MT — Content-Style Decoupling for Unsupervised Makeup Transfer (CVPR 2024)
+- **Why it's the engine:** takes `(source face, reference face)` directly — no same-person pair,
+  no pseudo ground truth — and is tiny (ngf=16 generator, ~28 MB) so it runs on **CPU in ~1 s** at
+  256 px, which is what the free Space has. Content/style decoupling keeps the target's identity;
+  cross-attention over face-parsing semantics handles pose/expression differences.
+- Authors: Zhaoyang Sun, Shengwu Xiong, Yaxiong Chen, Yi Rong
+- Paper: https://arxiv.org/abs/2405.17240
+- **GitHub:** https://github.com/Snowfallingplum/CSD-MT — weights: Google Drive folder linked in
+  `quick_start/` (`CSD_MT.pth`, `79999_iter.pth`); fetched by `makeup_transfer.fetch_weights`.
+- License: **CC BY-NC-SA 4.0** (non-commercial).
+- **How we use it (`engine.py`):** dlib crop replaced by MediaPipe landmarks with the same
+  margins; spectacles mapped to *background* in the semantic encoding so a reference's frames
+  are never sampled as eye shadow; output applied as a **delta** onto the full-res photo, gated
+  by BiSeNet regions + the segmenter skin mask; complexion (uniform L / colour cast on skin)
+  damped in Lab so the target keeps its own skin tone.
+
+### Heavier tiers evaluated (not shipped — documented upgrade path)
+- **Stable-Makeup** (SIGGRAPH 2025, Apache-2.0): SD1.5 + two ControlNet-style encoders + CLIP
+  detail encoder; weights on Google Drive; fp16 CUDA only as shipped. Higher fidelity for
+  artistic looks but a discrete GPU and ~1 min/img. Would slot behind `Engine.transfer_crop`.
+  https://github.com/Xiaojiu-z/Stable-Makeup
+- **FLUX-Makeup** (2025, Apache-2.0 weights at `qihoo360/FLUX-Makeup`): DiT on FLUX.1-Kontext-dev
+  (gated, non-commercial, 12B → 24 GB+ VRAM). Best reported fidelity; cloud-GPU only.
+  https://github.com/360CVGroup/FLUX-Makeup
+- **SHMT** (NeurIPS 2024, CC BY-NC-SA): latent diffusion, needs user-supplied seg + 3D maps and
+  the LDM VQ-f4 autoencoder; 50 DDIM steps. https://github.com/Snowfallingplum/SHMT
+- **EleGANt** (ECCV 2022, CC BY-NC-SA): GAN alternative to CSD-MT, needs dlib; CUDA-only demo.
+- **General image editors via API** (Gemini image, FLUX Kontext, Qwen-Image-Edit): multi-image
+  edit prompts can do "apply the makeup from image 2 to image 1" well, at ~$0.03/image and with
+  no local weights — a reasonable paid "HQ" mode later.
 
 ## ⭐ PRIMARY — extract makeup as a UV layer + alpha matte (our core idea)
 

@@ -346,6 +346,72 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     the HF Space + push `space_build/`, import to Vercel (root `site/`), DNS CNAME, then
     update `site/lib/links.ts` slugs if they differ.
 
+- **2026-08-03 — Occlusion masking (`occlusion.py`): two bugs, one missing signal.**
+  Reported from app testing: (1) hair showing up inside extracted looks, (2) brow/eye color
+  painted *over* hair that covers the target's face. Both were the same gap — the landmark mesh
+  spans the face oval with no idea what is in front of it. Fixed with MediaPipe's **selfie
+  multiclass segmenter** (`weights/selfie_multiclass_256x256.tflite`, 16 MB, CPU, Apache-2.0;
+  brows/eyes/lips are labelled face-skin, so makeup regions survive):
+  - **Apply** — the composite alpha is multiplied by the target's skin mask. Measured on
+    `003417_bare.jpg` (heavy spectacle frames crossing the brows): mean change on occluder
+    pixels **7.32 → 0.18** (−98%) while change on skin stays 2.52 → 2.50.
+  - **Extract** — the mask folds into each shot's visibility, and the pair is now mirror-filled
+    **jointly** (`uv_unwrap.mirror_fill_pair`). Filling each shot separately was itself a bug:
+    a pixel mirrored in one shot and kept in the other compares two different bits of face, and
+    that mismatch reads as makeup along the hairline (peak spurious alpha 0.37 → 0.24 once
+    shared). The matte is then repaired from the mirrored half where the pair is comparable
+    (`repair_occluded_alpha`), and zeroed where both halves are covered. White-balance and
+    `skin_lab_mean` statistics are taken over unoccluded skin only.
+  - Both paths (difference and `--prior`) are gated; `--no-occlusion` restores the old
+    behavior, and a missing weight file degrades to it automatically (`occlusion.available()`).
+  - **Known residual:** the mirrored fill copies absolute color, so left/right shading
+    asymmetry leaves a faint low-alpha patch where a fringe was removed. Shading-matched
+    fill is the fix if it ever matters; alpha there is ~0.1.
+
+- **2026-11-13 — Engine rewrite: reference-based transfer (`engine.py`) replaces the UV-layer
+  extractor as the default. Reported problem: "the result looks like a layer of color on top
+  of the image with the right shape; doesn't look natural."**
+  - **Diagnosis.** Inspecting the seed look layers: the pair-difference matte had kept only a
+    faint lip tint — eye shadow, liner, brows, blush were all suppressed as illumination /
+    chroma drift (the same failure the Phase-4 prior could not fix). Apply then had nothing to
+    paint but a uniform tint through the per-region blend modes, hence "a color layer". No blend
+    tuning can recover signal the extractor discarded.
+  - **Research (same day).** Candidates with released weights: CSD-MT (CVPR 2024, GAN, CPU-tested
+    by its authors, CC BY-NC-SA), EleGANt (ECCV 2022, GAN, CUDA demo), Stable-Makeup (SIGGRAPH
+    2025, SD1.5 diffusion, Apache-2.0, fp16 CUDA), SHMT (NeurIPS 2024, latent diffusion, needs
+    seg + 3D maps), FLUX-Makeup (2025, FLUX-Kontext DiT, 24 GB+ VRAM). Hosting is a free CPU
+    Space and the dev box is an M2 laptop, so the diffusion models are a paid-GPU tier, not a
+    default. **Picked CSD-MT** for the shipping engine; the others are documented in
+    `references.md` as the upgrade path behind the same crop → delta interface.
+  - **What was built.** `engine.py`: MediaPipe-landmark face crop with CSD-MT's own margins
+    (dlib dropped) → BiSeNet parse → CSD-MT generator at 256 px → **delta composite** onto the
+    full-res photo (output − input, upsampled, lightly blurred above 1.5× to hide 256-px edges),
+    gated by a feathered edit mask (skin / nose / lips / brows; not neck, ears, eye openings,
+    mouth, hair) × per-region strengths × the segmenter's skin-visibility mask. Vendored
+    inference code under `vendor/csd_mt/` (pure `torch.nn`, ImageNet-download hook removed);
+    `fetch_weights.py` pulls the two `.pth` files (Drive, with an HF mirror for BiSeNet).
+  - **Three fixes found by looking at results, in order:** (1) a reference wearing glasses leaked
+    its dark frames as eye shadow → spectacles are mapped to *background* in the semantic
+    encoding so the attention never samples them; (2) the reference's foundation came across
+    as whole-face whitening next to an untouched neck → `complexion` control: on bare skin the
+    delta's L and its uniform a/b cast are scaled to `keep` (default 0.4) in Lab, local chroma
+    kept except a cool (−b) shift, which is scaled too — blush/bronzer are warm, grey-blue on
+    skin never is; (3) the neck is excluded from edits outright.
+  - **Product change.** A look is now a stored **reference face** (`looks/<name>/reference.png`);
+    "Create a look" needs **one photo of anyone** — no same-person pair, no GPU. The app's
+    SSAT single-photo panel is gone (the whole flow is single-photo now); legacy `layer.png`
+    looks still apply via `apply_look`'s fallback. Seed looks regenerated. Sliders: lips / eyes
+    / brows / skin + "Borrow their complexion". Space build now ships torch-CPU + the weights.
+  - **Measured.** CPU (M2): 1.3–1.6 s per transfer on 512 px photos, ~3.5 s on a 12 MP phone
+    photo (BiSeNet at the crop's resolution dominates). Glasses-target occluder change stays
+    < 0.5 (test). Visual grid (`preprocess_out/engine/grid.jpg`): shadow, liner, lipstick, brows
+    and blush all transfer; the sample FFHQ looks on the user's real photo keep her skin tone.
+  - **Known limits / next.** 256 px network: very fine liner is soft at 12 MP; strong lip-colour
+    looks can read "painted" on dark or textured lips (delta is additive, not multiplicative);
+    the generator is trained on frontal-ish faces, so profiles degrade. The documented next
+    step for fidelity is a diffusion engine (Stable-Makeup / FLUX-Makeup) behind
+    `Engine.transfer_crop` on a GPU tier, or an image-edit API as a paid "HQ" mode.
+
 ## Open questions to settle during build
 - Refiner: small U-Net on synthetic composites vs fine-tune CPM's decoder vs low-strength SD
   img2img "enhance". **2026-07-02: deferred entirely** — delta composite removed the seam/grain

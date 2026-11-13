@@ -1,20 +1,23 @@
-"""Phase 3: Gradio web demo (``app.py``).
+"""Phase 3: Gradio web app (``app.py``).
 
 A thin browser UI over the already-built pipeline — it only calls existing public functions
-(``extract_look`` / ``extract_look_single`` / ``apply_look`` / ``LookStore``), reimplementing no
-pipeline logic.
+(``engine.create_look`` / ``apply_look`` / ``LookStore``), reimplementing no pipeline logic.
 
-The UI follows the order a first-time visitor actually works in:
+Designed for a first-time visitor:
 
-1. **Try a look** — pick a saved look + a target face -> before/after result (CPU).
-2. **Make a look** — with-makeup + bare photos of the same person -> saved RGBA look (CPU).
-   Its "one photo only" panel uses SSAT removal (Phase 2.5) and **requires CUDA**.
-3. **Your looks** — browse / delete / zip-export saved looks.
+1. **Try on** — the landing screen. Three numbered steps on one page: choose a look (shown as
+   the face it came from), add a photo, see the result. The result applies itself as soon as
+   both are chosen — there is no button to find.
+2. **Create a look** — one photo of anyone wearing makeup -> saved look (CPU, a few seconds).
+3. **My looks** — pick a look, then try it on / download it / delete it.
+
+The transfer itself is the reference-based engine (``engine.py``); legacy UV-layer looks still
+apply through the same ``apply_look`` call.
 
 Uploads are handled as file *paths* (``gr.Image(type="filepath")``) to match the pipeline's
 path-based API. Pipeline outputs are OpenCV BGR arrays, converted to RGB for display here.
-Visual language (porcelain/ink/pigment, Jost + Karla, pigment-chip swatches) matches the
-product site so the demo reads as part of the same product.
+Visual language: a "compact case" — looks are round pans, the result sits in a ringed mirror;
+white paper + cornflower blue, Bricolage Grotesque + Figtree, light-only.
 
 Run (from the repo root)::
 
@@ -32,12 +35,17 @@ import numpy as np
 import gradio as gr
 
 from .apply import DEFAULT_REGION_PARAMS, apply_look, region_weights_uv
-from .extract import _checker_preview, extract_look, extract_look_single
+from .engine import DEFAULT_COMPLEXION, create_look, reference_swatches
+from .engine import available as engine_available
+from .engine import missing_weights_message
+from .extract import _checker_preview
 from .storage import LookStore
 
 _ROOT = Path(__file__).resolve().parents[2]
 WEBAPP_OUT = _ROOT / "preprocess_out" / "webapp"
 WEBAPP_OUT.mkdir(parents=True, exist_ok=True)
+THUMBS = WEBAPP_OUT / "thumbs"
+THUMBS.mkdir(parents=True, exist_ok=True)
 SAMPLES = _ROOT / "data" / "ffhq_makeup"
 
 store = LookStore()
@@ -45,19 +53,23 @@ store = LookStore()
 # Slider order used everywhere strengths are read/written: lips, eyes, brows, skin.
 _REGIONS = ["lips", "eyes", "brows", "skin"]
 
+# The bundled looks are named after their dataset ids; show people a name instead.
+_SEED_TITLES = {
+    "ffhq-002386-03": "Rose Satin",
+    "ffhq-003125-02": "Warm Nude",
+    "ffhq-003417-05": "Deep Plum",
+}
+_THUMB_PX = 320
 
-def _single_photo_available() -> tuple[bool, str]:
-    """Can the SSAT single-photo panel actually run here? (ok, reason-if-not)."""
-    from .removal import SSAT_WEIGHTS  # safe: removal.py imports torch lazily
-    if not SSAT_WEIGHTS.exists():
-        return False, ("SSAT weights are not present on this machine "
-                       "(third_party/SSAT). Clone the repo and run locally with a GPU.")
+
+def _engine_available() -> tuple[bool, str]:
+    """Can the makeup engine run here? (ok, reason-if-not). Legacy looks still work without it."""
+    if not engine_available():
+        return False, missing_weights_message()
     try:
-        import torch
+        import torch  # noqa: F401
     except ImportError:
-        return False, "PyTorch is not installed here."
-    if not torch.cuda.is_available():
-        return False, "No CUDA GPU is available here."
+        return False, "PyTorch is not installed here (pip install torch)."
     return True, ""
 
 
@@ -71,30 +83,88 @@ def _preview_rgb(layer_rgba: np.ndarray) -> np.ndarray:
     return _bgr2rgb(_checker_preview(layer_rgba))
 
 
-def _looks() -> list[str]:
-    return store.list_looks()
+def _title(name: str | None) -> str:
+    if not name:
+        return ""
+    return _SEED_TITLES.get(name) or name.replace("-", " ").replace("_", " ").strip().title()
 
 
-def _gallery_items() -> list[tuple[np.ndarray, str]]:
-    items: list[tuple[np.ndarray, str]] = []
-    for name in _looks():
+def _square(img: np.ndarray, size: int = _THUMB_PX) -> np.ndarray:
+    """Centre-crop to a square and shrink — thumbnails for the look picker."""
+    h, w = img.shape[:2]
+    s = min(h, w)
+    y, x = (h - s) // 2, (w - s) // 2
+    return cv2.resize(img[y:y + s, x:x + s], (size, size), interpolation=cv2.INTER_AREA)
+
+
+def _save_thumb(name: str, photo_path: str | None) -> None:
+    """Cache a square thumbnail of the face the look came from (uploads are temp files)."""
+    img = cv2.imread(str(photo_path)) if photo_path else None
+    if img is not None:
+        cv2.imwrite(str(THUMBS / f"{name}.jpg"), _square(img))
+
+
+def _thumb_rgb(name: str) -> np.ndarray:
+    """A face wearing the look. Engine looks *are* that face (the stored reference crop);
+    legacy looks fall back to their source photo, a sample face, then the UV layer."""
+    if (ref := store.load_reference(name)) is not None:
+        return _square(ref)
+    cached = THUMBS / f"{name}.jpg"
+    if not cached.exists():
+        src = store.load_meta(name).source_with
+        if src:
+            path = Path(src) if Path(src).is_absolute() else _ROOT / src
+            if path.exists():
+                _save_thumb(name, str(path))
+    if not cached.exists() and (fallback := _sample("003417_bare.jpg")):
+        try:  # source photo gone (e.g. a temp upload): show the look worn by a sample face
+            worn, _ = apply_look(name, fallback, store=store)
+            cv2.imwrite(str(cached), _square(worn))
+        except Exception:
+            pass
+    img = cv2.imread(str(cached)) if cached.exists() else None
+    if img is None:
+        return _preview_rgb(store.load_layer(name))
+    return _bgr2rgb(img)
+
+
+def _library() -> list[tuple[str, np.ndarray]]:
+    """(name, thumbnail) for every loadable look — one list so gallery index == name index."""
+    out: list[tuple[str, np.ndarray]] = []
+    for name in store.list_looks():
         try:
-            items.append((_preview_rgb(store.load_layer(name)), name))
+            out.append((name, _thumb_rgb(name)))
         except Exception:  # a half-written look shouldn't break the gallery
             continue
-    return items
+    return out
 
 
-def _look_strengths(look: str | None) -> tuple[float, float, float, float]:
-    """Per-region strengths for a look (its meta merged over defaults), in _REGIONS order."""
+def _look_names() -> list[str]:
+    return [name for name, _ in _library()]
+
+
+def _gallery(selected: str | None = None):
+    """Gallery value (+ highlighted selection) built from the current library."""
+    lib = _library()
+    names = [n for n, _ in lib]
+    return gr.update(value=[(img, _title(n)) for n, img in lib],
+                     selected_index=names.index(selected) if selected in names else None)
+
+
+def _look_strengths(look: str | None) -> tuple[float, float, float, float, float]:
+    """Per-region strengths for a look (its meta merged over defaults), in _REGIONS order,
+    followed by its complexion setting (engine looks; ignored by legacy looks)."""
     regions = {k: dict(v) for k, v in DEFAULT_REGION_PARAMS.items()}
+    complexion = DEFAULT_COMPLEXION
     if look:
-        for k, v in (store.load_meta(look).blend_params or {}).get("regions", {}).items():
+        bp = store.load_meta(look).blend_params or {}
+        for k, v in bp.get("regions", {}).items():
             regions.setdefault(k, {}).update(v)
-    return tuple(float(regions[r].get("strength", 1.0)) for r in _REGIONS)  # type: ignore[return-value]
+        complexion = float(bp.get("complexion", complexion))
+    return (*(float(regions[r].get("strength", 1.0)) for r in _REGIONS), complexion)  # type: ignore[return-value]
 
 
-# --- pigment chips ----------------------------------------------------------------------------
+# --- colour chips -----------------------------------------------------------------------------
 @lru_cache(maxsize=1)
 def _uv_regions(uv_size: int) -> dict[str, np.ndarray]:
     return region_weights_uv(uv_size)
@@ -116,37 +186,47 @@ def _region_pigment(layer_rgba: np.ndarray, region: np.ndarray) -> tuple[str, fl
     return "#{:02x}{:02x}{:02x}".format(*(int(np.clip(c, 0, 255)) for c in (r, g, b))), coverage
 
 
+def _look_colors(look: str) -> dict[str, str]:
+    """``region -> #hex`` for a look: parsed off the reference face (engine looks) or sampled
+    from the UV layer (legacy looks). Empty when neither is possible."""
+    if (ref := store.load_reference(look)) is not None:
+        if not _engine_available()[0]:
+            return {}
+        return reference_swatches(ref)
+    layer = store.load_layer(look)
+    regions = _uv_regions(layer.shape[0])
+    out = {}
+    for name in _REGIONS:
+        if (weights := regions.get(name)) is None:
+            continue
+        if (sample := _region_pigment(layer, weights)) is not None:
+            out[name] = sample[0]
+    return out
+
+
 def _swatch_html(look: str | None) -> str:
-    """The look's real pigments, sampled per region — what you get before you apply it."""
+    """The look's real colours, sampled per region — what you get before you apply it."""
     if not look:
         return ""
     try:
-        layer = store.load_layer(look)
-        regions = _uv_regions(layer.shape[0])
+        colors = _look_colors(look)
     except Exception:
         return ""
     chips = []
     for name in _REGIONS:
-        weights = regions.get(name)
-        if weights is None:
+        if (hex_color := colors.get(name)) is None:
             continue
-        sample = _region_pigment(layer, weights)
-        if sample is None:
-            continue
-        hex_colour, coverage = sample
-        chips.append(
-            f'<div class="chip"><span class="chip-dot" style="background:{hex_colour}"></span>'
-            f'<span class="chip-name">{name}</span>'
-            f'<span class="chip-hex">{hex_colour} · {round(coverage * 100)}%</span></div>'
-        )
+        chips.append(f'<span class="chip" title="{hex_color}">'
+                     f'<span class="chip-dot" style="background:{hex_color}"></span>'
+                     f'{name}</span>')
     if not chips:
         return ""
-    return (f'<div class="chips"><p class="chips-title">Pigments in {look}</p>'
-            f'<div class="chip-row">{"".join(chips)}</div></div>')
+    return (f'<div class="chips"><span class="chips-title">{_title(look)}</span>'
+            f'{"".join(chips)}</div>')
 
 
 def _look_panel(look: str | None):
-    """Everything that follows from selecting a look: its recipe sliders + its pigments."""
+    """Everything that follows from selecting a look: its intensity sliders + its colours."""
     return (*_look_strengths(look), _swatch_html(look))
 
 
@@ -166,406 +246,451 @@ def _sample_rows(rows: list[list[str | float]]) -> list[list]:
     return kept
 
 
-# --- tab callbacks ---------------------------------------------------------------------------
-def do_extract_pair(with_path, bare_path, name, sym):
-    if not with_path or not bare_path:
-        raise gr.Error("Upload both a with-makeup photo and a bare photo of the same person.")
-    name = (name or "").strip()
-    if not name:
-        raise gr.Error("Give the look a name.")
-    try:
-        layer, _, _ = extract_look(with_path, bare_path, name, sym=float(sym), store=store)
-    except ValueError as e:  # detect_face raises ValueError when no face is found
-        raise gr.Error(f"Could not process the photos: {e}. Use frontal, well-lit faces.")
-    looks = _looks()
-    items = _gallery_items()
-    return (
-        gr.update(value=_preview_rgb(layer), visible=True),
-        f"Saved **{name}**. Pick it in Try a look to wear it on another face.",
-        gr.update(choices=looks, value=name),
-        gr.update(choices=looks, value=name),
-        items,
-        items,
-    )
+# --- try-on callbacks -------------------------------------------------------------------------
+def do_select_look(evt: gr.SelectData):
+    names = _look_names()
+    look = names[evt.index] if 0 <= evt.index < len(names) else None
+    return (look, *_look_panel(look))
 
 
-def do_extract_single(with_path, ref_path, name, sym):
-    if not with_path:
-        raise gr.Error("Upload a with-makeup photo.")
-    name = (name or "").strip()
-    if not name:
-        raise gr.Error("Give the look a name.")
-    pseudo_path = WEBAPP_OUT / f"{name}_pseudo_bare.png"
-    try:
-        layer, _, _ = extract_look_single(
-            with_path, name, sym=float(sym), store=store,
-            reference=ref_path or None, pseudo_out=pseudo_path,
-        )
-    except RuntimeError as e:  # SSAT removal asserts CUDA (removal.py)
-        raise gr.Error(
-            f"Single-photo mode needs a CUDA GPU ({e}). "
-            "On a CPU-only machine, use two photos instead."
-        )
-    except ValueError as e:
-        raise gr.Error(f"Could not process the photo: {e}. Use a frontal, well-lit face.")
-    pseudo = cv2.imread(str(pseudo_path))
-    looks = _looks()
-    items = _gallery_items()
-    return (
-        gr.update(value=_bgr2rgb(pseudo) if pseudo is not None else None,
-                  visible=pseudo is not None),
-        gr.update(value=_preview_rgb(layer), visible=True),
-        f"Saved **{name}** from one photo. Pick it in Try a look to wear it on another face.",
-        gr.update(choices=looks, value=name),
-        gr.update(choices=looks, value=name),
-        items,
-        items,
-    )
-
-
-def do_apply(look, target_path, lips, eyes, brows, skin, composite):
-    if not look:
-        raise gr.Error("Pick a look first.")
-    if not target_path:
-        raise gr.Error("Add a face to wear the look.")
+def do_try(look, target_path, lips, eyes, brows, skin, complexion):
+    """Apply as soon as both halves are there; until then, say what's missing."""
+    if not look or not target_path:
+        hint = ("Choose a look in step 1." if not look else
+                "Add a photo in step 2 — or tap one of the sample faces.")
+        return gr.skip(), gr.skip(), gr.skip(), hint
     strengths = {"lips": float(lips), "eyes": float(eyes),
                  "brows": float(brows), "skin": float(skin)}
+    if store.has_reference(look) and not (ok := _engine_available())[0]:
+        return gr.skip(), gr.skip(), gr.skip(), f"**The makeup engine isn't set up here.** {ok[1]}"
     try:
-        result_bgr, debug = apply_look(
-            look, target_path, strengths=strengths, composite=composite, store=store,
-        )
-    except ValueError as e:
-        raise gr.Error(f"Could not apply the look: {e}")
-    out_path = WEBAPP_OUT / f"{look}_on_target.png"
+        result_bgr, debug = apply_look(look, target_path, strengths=strengths, store=store,
+                                       complexion=float(complexion))
+    except ValueError:
+        return (gr.skip(), gr.skip(), gr.skip(),
+                "**We couldn't find a face in that photo.** Try a clear, front-facing photo "
+                "in good light.")
+    out_path = WEBAPP_OUT / f"makeup-{look}.png"
     cv2.imwrite(str(out_path), result_bgr)
-    return (gr.update(value=(_bgr2rgb(debug["target"]), _bgr2rgb(result_bgr)), visible=True),
-            gr.update(value=str(out_path), visible=True))
+    return (gr.update(visible=False),
+            gr.update(value=(_bgr2rgb(debug["target"]), _bgr2rgb(result_bgr)), visible=True),
+            gr.update(value=str(out_path), visible=True),
+            f"Wearing **{_title(look)}** · drag the handle to compare")
 
 
-def do_pick_from_gallery(evt: gr.SelectData):
-    names = _looks()
-    return names[evt.index] if 0 <= evt.index < len(names) else None
+# --- create-a-look callbacks ------------------------------------------------------------------
+def _created(name: str, photo_path: str | None, message: str):
+    """Shared tail of both extract paths: thumbnail, refreshed galleries, a way forward."""
+    _save_thumb(name, photo_path)
+    return (message, gr.update(visible=True), name,
+            _gallery(name), _gallery(name))
 
 
-def do_delete(look):
-    if not look:
-        raise gr.Error("Pick a look to delete.")
-    store.delete(look)
-    looks = _looks()
-    items = _gallery_items()
-    return (
-        gr.update(choices=looks, value=None),
-        gr.update(choices=looks, value=None),
-        items,
-        items,
-        f"Deleted **{look}**.",
-    )
+def do_create(with_path, name):
+    if not with_path:
+        raise gr.Error("Add a photo of someone wearing the makeup.")
+    name = (name or "").strip()
+    if not name:
+        raise gr.Error("Give your look a name.")
+    ok, why = _engine_available()
+    if not ok:
+        raise gr.Error(f"The makeup engine isn't set up here. {why}")
+    try:
+        ref, _ = create_look(with_path, name, store=store)
+    except ValueError as e:  # detect_face raises ValueError when no face is found
+        raise gr.Error(f"We couldn't read that photo ({e}). Use a front-facing, well-lit face.")
+    return (gr.update(value=ref, visible=True),
+            *_created(name, with_path, f"**{_title(name)}** is saved to your looks."))
+
+
+def do_go_try(look):
+    """Jump to the Try-on screen with ``look`` selected."""
+    return (gr.Tabs(selected="try"), look, _gallery(look), *_look_panel(look))
+
+
+# --- my-looks callbacks -----------------------------------------------------------------------
+def do_select_library(evt: gr.SelectData):
+    names = _look_names()
+    look = names[evt.index] if 0 <= evt.index < len(names) else None
+    return (look, gr.update(visible=look is not None),
+            f"### {_title(look)}" if look else "", gr.update(visible=False),
+            gr.update(visible=False))
 
 
 def do_export(look):
     if not look:
-        raise gr.Error("Pick a look to export.")
+        raise gr.Error("Choose a look first.")
     out = WEBAPP_OUT / f"{look}.zip"
     store.export_zip(look, out)
     return gr.update(value=str(out), visible=True)
 
 
-def do_refresh():
-    looks = _looks()
-    items = _gallery_items()
-    return gr.update(choices=looks), gr.update(choices=looks), items, items
+def do_ask_delete(look):
+    return gr.update(visible=bool(look), value=f"Delete **{_title(look)}**? This can't be undone.")
+
+
+def do_delete(look, try_look):
+    if not look:
+        raise gr.Error("Choose a look first.")
+    store.delete(look)
+    (THUMBS / f"{look}.jpg").unlink(missing_ok=True)
+    try_look = None if try_look == look else try_look
+    return (None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+            try_look, _gallery(try_look), _gallery(None))
+
+
+def do_reload(try_look):
+    return _gallery(try_look), _gallery(None)
 
 
 # --- look & feel ------------------------------------------------------------------------------
+# "Compact case": looks are round pans, the result sits in a ringed mirror. White paper,
+# cornflower ink, powder-blue tints — the makeup on the faces is the only warm colour.
+_PAPER, _MIST, _LINE, _POWDER = "#ffffff", "#f3f7fb", "#e6edf5", "#dcebf9"
+_CORNFLOWER, _CORNFLOWER_DEEP, _INK, _SLATE = "#2f74bb", "#265f9b", "#1e2633", "#6a7686"
+
 THEME = gr.themes.Base(
     primary_hue=gr.themes.Color(
-        c50="#fdf2f5", c100="#fbe3ea", c200="#f3c2d0", c300="#e694ac",
-        c400="#d45f83", c500="#b0173f", c600="#9d1338", c700="#8d0f31",
-        c800="#6f0c27", c900="#520a1d", c950="#360613",
+        c50="#f1f7fd", c100="#e3effb", c200="#c8e0f6", c300="#9fc8ef",
+        c400="#6aa9e3", c500="#3a8ad6", c600="#2f74bb", c700="#265f9b",
+        c800="#224f7e", c900="#1f4367", c950="#152c45",
     ),
     neutral_hue=gr.themes.Color(
-        c50="#fbf9f8", c100="#f2ecea", c200="#e8dedb", c300="#d3c6c3",
-        c400="#a6969b", c500="#6b5b63", c600="#54454c", c700="#3a2f3c",
-        c800="#241c28", c900="#17121a", c950="#0f0b11",
+        c50="#f8fafc", c100="#f3f7fb", c200="#e6edf5", c300="#d2dce7",
+        c400="#9ba8b7", c500="#6a7686", c600="#515d6c", c700="#3c4655",
+        c800="#2a3240", c900="#1e2633", c950="#131922",
     ),
-    font=(gr.themes.GoogleFont("Karla"), "ui-sans-serif", "system-ui", "sans-serif"),
+    font=(gr.themes.GoogleFont("Figtree"), "ui-sans-serif", "system-ui", "sans-serif"),
     font_mono=(gr.themes.GoogleFont("IBM Plex Mono"), "ui-monospace", "monospace"),
-    radius_size=gr.themes.sizes.radius_sm,
+    radius_size=gr.themes.sizes.radius_md,
 ).set(
-    body_background_fill="#fbf9f8",
-    body_background_fill_dark="#17121a",
-    block_background_fill="#ffffff",
-    block_background_fill_dark="#241c28",
-    block_border_color="#e8dedb",
-    block_border_color_dark="#3a2f3c",
+    body_background_fill=_PAPER,
+    body_text_color=_INK,
+    body_text_color_subdued=_SLATE,
+    background_fill_primary=_PAPER,
+    background_fill_secondary=_MIST,
+    block_background_fill=_PAPER,
+    block_border_color=_LINE,
+    block_border_width="1px",
+    block_radius="16px",
+    block_label_background_fill=_PAPER,
+    block_label_text_color=_SLATE,
     block_label_text_weight="600",
-    button_primary_background_fill="#b0173f",
-    button_primary_background_fill_hover="#8d0f31",
+    block_shadow="none",
+    input_background_fill=_MIST,
+    input_border_color=_LINE,
+    input_radius="12px",
+    button_primary_background_fill=_CORNFLOWER,
+    button_primary_background_fill_hover=_CORNFLOWER_DEEP,
     button_primary_text_color="#ffffff",
-    button_large_radius="6px",
-    button_small_radius="6px",
+    button_secondary_background_fill="#eaf3fc",
+    button_secondary_background_fill_hover=_POWDER,
+    button_secondary_text_color=_CORNFLOWER,
+    button_large_radius="999px",
+    button_small_radius="999px",
+    slider_color="#3a8ad6",
 )
+# Light-only: make every dark-mode token identical to its light twin, so an OS in dark mode
+# can't turn the page black even before (or without) the _FORCE_LIGHT script running.
+for _attr in list(vars(THEME)):
+    if _attr.endswith("_dark") and hasattr(THEME, _attr[:-5]):
+        setattr(THEME, _attr, getattr(THEME, _attr[:-5]))
 
 CSS = """
-:root, .dark { --display: 'Jost', ui-sans-serif, system-ui, sans-serif; }
-.gradio-container { max-width: 1180px !important; }
-
-/* masthead ------------------------------------------------------------------ */
-#masthead { border-bottom: 1px solid var(--block-border-color); padding-bottom: 1.1rem; }
-#masthead h1 {
-  font-family: var(--display); font-weight: 300; letter-spacing: -0.03em;
-  font-size: clamp(2.4rem, 6vw, 3.6rem); line-height: 1.02; margin: 0 0 .5rem;
+:root {
+  --display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
+  --paper: #ffffff; --mist: #f3f7fb; --line: #e6edf5; --powder: #dcebf9;
+  --cornflower: #2f74bb; --ink: #1e2633; --slate: #6a7686;
 }
-#masthead p { max-width: 42rem; color: var(--body-text-color-subdued); margin: 0; }
-#masthead .rule { color: var(--primary-500); font-weight: 500; }
-
-/* step eyebrows: the tabs really are a sequence, so they are numbered -------- */
-.kicker { padding: .3rem 0 .9rem; }
-.kicker .eyebrow {
-  font-family: var(--display); font-size: .72rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: .18em;
-  color: var(--primary-500); margin: 0 0 .4rem;
-}
-.kicker .eyebrow .n { color: var(--body-text-color-subdued); margin-right: .6rem; }
-.kicker .sub {
-  max-width: 46rem; color: var(--body-text-color-subdued);
-  font-size: .95rem; margin: 0;
-}
-.kicker em { font-style: normal; color: var(--body-text-color); font-weight: 600; }
-.note p { color: var(--body-text-color-subdued); font-size: .92rem; margin: 0 0 .2rem; }
-
-/* look picker --------------------------------------------------------------- */
-.looks .caption-label { font-family: var(--display); font-size: .72rem; }
-/* narrow screens: wrap the picker into rows instead of clipping looks offscreen */
-@media (max-width: 700px) {
-  .looks, .looks .grid-wrap { height: 340px !important; max-height: none !important; }
-  .looks .grid-container {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  }
-}
-
-/* tabs ---------------------------------------------------------------------- */
-.tab-nav button {
-  font-family: var(--display) !important; font-weight: 500 !important;
-  letter-spacing: .01em; font-size: 1rem !important;
-}
-button.selected { color: var(--primary-500) !important; }
-
-/* pigment chips — the look's real colours, sampled from the layer ------------ */
-.chips { padding: .1rem 0 .2rem; }
-.chips-title {
-  font-family: var(--display); font-size: .68rem; font-weight: 600;
-  text-transform: uppercase; letter-spacing: .16em;
-  color: var(--body-text-color-subdued); margin: 0 0 .5rem;
-}
-.chip-row { display: flex; flex-wrap: wrap; gap: .4rem; }
-.chip {
-  display: flex; align-items: center; gap: .45rem;
-  border: 1px solid var(--block-border-color); border-radius: 999px;
-  padding: .26rem .7rem .26rem .3rem; background: var(--block-background-fill);
-}
-.chip-dot {
-  width: 1.05rem; height: 1.05rem; border-radius: 999px; display: inline-block;
-  box-shadow: inset 0 0 0 1px rgba(23, 18, 26, .16);
-}
-.chip-name { font-family: var(--display); font-weight: 500; font-size: .8rem; }
-.chip-hex {
-  font-family: var(--font-mono); font-size: .68rem;
-  color: var(--body-text-color-subdued);
-}
-
-/* actions ------------------------------------------------------------------- */
-.go button, .go { font-family: var(--display) !important; font-weight: 500 !important;
-  letter-spacing: .02em; }
-button.stop {
-  background: transparent !important; color: var(--primary-600) !important;
-  border: 1px solid var(--primary-200) !important;
-}
-button.stop:hover { background: var(--primary-50) !important; }
-.dark button.stop { border-color: var(--primary-800) !important; }
-.dark button.stop:hover { background: var(--primary-950) !important; }
-.dark .chip-dot { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .22); }
+body, gradio-app, .gradio-container, .main { background: var(--paper) !important; }
+.gradio-container { max-width: 1120px !important; color: var(--ink); }
 footer { display: none !important; }
+button:focus-visible, [role="tab"]:focus-visible, input:focus-visible {
+  outline: 2px solid var(--cornflower) !important; outline-offset: 2px; }
+
+/* masthead: the app says what it's for, once ------------------------------------ */
+#topbar { padding: 1.8rem 0 .4rem; }
+#topbar .brand { font-family: var(--display); font-weight: 700; font-size: .92rem;
+  letter-spacing: .01em; color: var(--cornflower); margin: 0 0 .4rem; }
+#topbar h1 { font-family: var(--display); font-weight: 600; letter-spacing: -.03em;
+  font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.04; color: var(--ink); margin: 0; }
+
+/* tabs: quiet text with an underline --------------------------------------------- */
+.tab-wrapper, .tab-container { border: 0 !important; }
+.tab-container { border-bottom: 1px solid var(--line) !important; gap: 1.4rem !important; }
+.tab-container button {
+  font-family: var(--display) !important; font-weight: 600 !important; font-size: 1rem !important;
+  color: var(--slate) !important; background: transparent !important; border: 0 !important;
+  border-radius: 0 !important; padding: .7rem 0 !important; }
+.tab-container button.selected { color: var(--ink) !important;
+  box-shadow: inset 0 -2px 0 var(--cornflower) !important; }
+.tab-container button::after { display: none !important; }
+
+/* steps: open space, no boxes — only the mirror gets a frame ------------------------ */
+.card { background: transparent !important; border: 0 !important; box-shadow: none !important;
+  border-radius: 0 !important; padding: 1.2rem 0 1.4rem !important; gap: .95rem !important; }
+.card + .card { border-top: 1px solid var(--line) !important; }
+.card > *:not(button) { background: transparent !important; }
+.card > .form, .card > .block:not(.looks):not(.image-container) { border: 0 !important; }
+.step { display: flex; gap: .7rem; align-items: flex-start; }
+.step .num { flex: none; width: 1.7rem; height: 1.7rem; border-radius: 999px; display: grid;
+  place-items: center; font-family: var(--display); font-weight: 700; font-size: .85rem;
+  background: var(--powder); color: var(--cornflower); }
+.step h3 { font-family: var(--display); font-weight: 600; font-size: 1.2rem;
+  letter-spacing: -.01em; margin: .05rem 0 .15rem; color: var(--ink); }
+.step p { margin: 0; color: var(--slate); font-size: .93rem; }
+
+/* looks as palette pans: round faces, name underneath ------------------------------ */
+.looks { border: 0 !important; background: transparent !important; }
+.looks, .looks .wrap, .looks .gallery-container, .looks .grid-wrap {
+  height: auto !important; min-height: 0 !important; max-height: none !important;
+  overflow: visible !important; background: transparent !important; }
+.looks .grid-wrap { padding: .3rem .1rem 0 !important; }
+.looks .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: .9rem !important; height: auto !important; }
+#library-gallery .grid-container {
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)) !important; gap: 1.4rem !important; }
+.looks .gallery-item { width: auto !important; height: auto !important; padding-bottom: 1.7rem; }
+.looks .thumbnail-item { width: 100% !important; height: auto !important; aspect-ratio: 1;
+  border-radius: 999px !important; border: 0 !important; box-shadow: none !important;
+  background: transparent !important; overflow: visible !important; }
+.looks .thumbnail-item img { width: 100% !important; height: 100% !important; object-fit: cover;
+  border-radius: 999px; box-shadow: 0 0 0 1px var(--line);
+  transition: box-shadow .18s ease, transform .18s ease; }
+.looks .thumbnail-item:hover img { transform: translateY(-2px); }
+.looks .thumbnail-item.selected img {
+  box-shadow: 0 0 0 3px var(--paper), 0 0 0 5px var(--cornflower); }
+.looks .caption-label { position: absolute !important; top: calc(100% + .45rem) !important;
+  left: 0 !important; right: 0 !important; bottom: auto !important; max-width: none !important;
+  background: transparent !important; color: var(--ink) !important; padding: 0 !important;
+  font-family: var(--display); font-size: .82rem; font-weight: 600; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.looks .thumbnail-item.selected .caption-label { color: var(--cornflower) !important; }
+@media (max-width: 700px) {
+  .looks .grid-container { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+}
+
+/* the look's colours, laid out like pans in a palette ------------------------------ */
+.chips { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem; }
+.chips-title { font-family: var(--display); font-weight: 600; color: var(--ink);
+  margin-right: .2rem; align-self: center; }
+.chip { display: inline-flex; flex-direction: column; align-items: center; gap: .3rem;
+  font-size: .74rem; color: var(--slate); }
+.chip-dot { width: 1.55rem; height: 1.55rem; border-radius: 999px; display: inline-block;
+  box-shadow: inset 0 0 0 1px rgba(30, 38, 51, .12), 0 1px 3px rgba(30, 38, 51, .12); }
+
+/* the mirror: the one framed thing on the page ------------------------------------- */
+#result-card { background: var(--mist) !important; border-radius: 28px !important;
+  padding: 1.4rem !important; margin-top: 1.2rem;
+  box-shadow: 0 0 0 6px var(--paper), 0 0 0 7px var(--powder) !important; }
+#result-card + * { margin-top: 0; }
+@media (min-width: 900px) { #result-card { position: sticky; top: 1.2rem; } }
+#result-card .block { background: transparent !important; border: 0 !important; }
+#result-card .accordion { border-top: 1px solid var(--line) !important; border-radius: 0 !important; }
+.empty { min-height: 440px; display: grid; place-content: center; text-align: center; padding: 2rem; }
+.empty .ring { width: 124px; height: 124px; border-radius: 999px; margin: 0 auto 1.3rem;
+  background: radial-gradient(circle at 34% 28%, #ffffff 0 18%, var(--powder) 70%);
+  box-shadow: 0 0 0 6px var(--paper), 0 0 0 7px var(--powder); }
+.empty p { font-family: var(--display); font-weight: 600; font-size: 1.15rem; color: var(--ink);
+  margin: 0 0 .3rem; }
+.empty span { color: var(--slate); font-size: .92rem; }
+.status p { margin: 0; color: var(--slate); text-align: center; }
+.status strong { color: var(--ink); }
+.hint p { color: var(--slate); font-size: .88rem; margin: 0; }
+
+/* buttons ------------------------------------------------------------------------ */
+.go, .go button { font-family: var(--display) !important; font-weight: 600 !important; }
+button.stop { background: transparent !important; color: #c04a66 !important;
+  border: 1px solid #f1c9d3 !important; }
+button.stop:hover { background: #fdf2f5 !important; }
+.accordion .label-wrap span { font-family: var(--display); font-weight: 600; }
+
+.foot p { color: var(--slate); font-size: .82rem; text-align: center; }
+.foot a { color: var(--cornflower) !important; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 """
 
 _FONT_LINK = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600'
+    '<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700'
     '&display=swap" rel="stylesheet">'
+)
+
+# Belt and braces with the token mirroring above: drop Gradio's dark class if it appears.
+_FORCE_LIGHT = """() => {
+  const light = () => [document.documentElement, document.body]
+    .forEach(el => el.classList.remove('dark'));
+  light();
+  new MutationObserver(light).observe(document.body, {attributes: true, attributeFilter: ['class']});
+}"""
+
+# Gradio 6 takes theme/css/head/js at launch() — the Space entrypoint passes these too.
+LAUNCH_KWARGS = {"theme": THEME, "css": CSS, "head": _FONT_LINK, "js": _FORCE_LIGHT}
+
+_EMPTY_RESULT = (
+    '<div class="empty"><div class="ring"></div><p>Your result appears here</p>'
+    '<span>Choose a look and add a photo. It applies automatically.</span></div>'
 )
 
 
 def _step(number: str, title: str, sub: str) -> str:
-    """Step eyebrow + one line of guidance. The tabs are a real sequence, so they're numbered."""
-    return (f'<div class="kicker"><p class="eyebrow"><span class="n">{number}</span>{title}</p>'
-            f'<p class="sub">{sub}</p></div>')
+    return (f'<div class="step"><span class="num">{number}</span>'
+            f'<div><h3>{title}</h3><p>{sub}</p></div></div>')
 
 
 # --- UI --------------------------------------------------------------------------------------
 def build_demo() -> gr.Blocks:
-    initial = _looks()
-    first = initial[0] if initial else None
-    l0, e0, b0, s0 = _look_strengths(first)
+    names = _look_names()
+    first = names[0] if names else None
+    l0, e0, b0, s0, c0 = _look_strengths(first)
+    engine_ok, engine_why = _engine_available()
 
-    with gr.Blocks(title="Makeup Transfer", theme=THEME, css=CSS, head=_FONT_LINK) as demo:
-        with gr.Column(elem_id="masthead"):
-            gr.HTML(
-                "<h1>Makeup&nbsp;Transfer</h1>"
-                "<p>Lift a makeup look off one face and wear it on another. The look is stored as "
-                "a <span class='rule'>translucent layer in 3D UV space</span>, so skin tone shows "
-                "through and the same look adapts to whoever wears it.</p>"
-            )
+    with gr.Blocks(title="Makeup Transfer") as demo:
+        gr.HTML('<div id="topbar"><p class="brand">Makeup Transfer</p>'
+                '<h1>Try a look before you wear it.</h1></div>')
 
-        with gr.Tabs():
-            # --- Step 1: try a look ---------------------------------------------------------
-            with gr.Tab("Try a look"):
-                gr.HTML(_step("01", "Pick a look, add a face",
-                              "A saved look plus the face that will wear it. Frontal, well-lit "
-                              "photos work best."))
+        look = gr.State(first)          # the look being worn on the Try-on screen
+        lib_pick = gr.State(None)       # the look selected in My looks
 
+        with gr.Tabs() as tabs:
+            # --- Try on --------------------------------------------------------------------
+            with gr.Tab("Try on", id="try"):
                 with gr.Row(equal_height=False):
-                    with gr.Column(scale=1):
-                        a_gallery = gr.Gallery(
-                            value=_gallery_items(), label="Looks — click one",
-                            columns=4, height=168, object_fit="cover",
-                            allow_preview=False, elem_classes="looks",
-                        )
-                        a_look = gr.Dropdown(choices=initial, value=first, label="Selected look")
-                        a_swatch = gr.HTML(_swatch_html(first))
+                    with gr.Column(scale=5):
+                        with gr.Column(elem_classes="card"):
+                            gr.HTML(_step("1", "Choose a look", "Tap a face to borrow its makeup."))
+                            a_gallery = gr.Gallery(
+                                value=_gallery(first)["value"], selected_index=0 if first else None,
+                                show_label=False, columns=4, height="auto", object_fit="cover",
+                                allow_preview=False, buttons=[], elem_classes="looks",
+                            )
+                            a_swatch = gr.HTML(_swatch_html(first))
 
-                    with gr.Column(scale=1):
-                        a_target = gr.Image(label="Face to make up", type="filepath", height=300)
-                        target_rows = _sample_rows([["002386_bare.jpg"], ["003125_bare.jpg"],
-                                                    ["003417_bare.jpg"]])
-                        if target_rows:
-                            gr.Examples(target_rows, inputs=a_target,
-                                        label="Or start with a sample face", examples_per_page=3)
+                        with gr.Column(elem_classes="card"):
+                            gr.HTML(_step("2", "Add your photo",
+                                          "Front-facing, good light, nothing covering the face."))
+                            a_target = gr.Image(type="filepath", show_label=False, height=260,
+                                                sources=["upload", "webcam", "clipboard"])
+                            target_rows = _sample_rows([["002386_bare.jpg"], ["003125_bare.jpg"],
+                                                        ["003417_bare.jpg"]])
+                            if target_rows:
+                                gr.Examples(target_rows, inputs=a_target,
+                                            label="No photo handy? Use a sample face",
+                                            examples_per_page=3)
 
-                with gr.Accordion("Fine-tune", open=False):
-                    gr.Markdown("Each slider scales one region of the look. 1.0 is the strength "
-                                "the look was saved at.", elem_classes="note")
+                    with gr.Column(scale=6, elem_id="result-card", elem_classes="card"):
+                        gr.HTML(_step("3", "See the result", "Drag the handle to compare before and after."))
+                        a_empty = gr.HTML(_EMPTY_RESULT)
+                        a_side = gr.ImageSlider(show_label=False, visible=False, type="numpy",
+                                                slider_position=50, height=520)
+                        a_status = gr.Markdown(elem_classes="status")
+                        a_file = gr.DownloadButton("Download photo", variant="primary", size="lg",
+                                                   visible=False, elem_classes="go")
+                        with gr.Accordion("Adjust intensity", open=False):
+                            with gr.Row():
+                                a_lips = gr.Slider(0.0, 1.5, value=l0, step=0.05, label="Lips")
+                                a_eyes = gr.Slider(0.0, 1.5, value=e0, step=0.05, label="Eyes")
+                            with gr.Row():
+                                a_brows = gr.Slider(0.0, 1.5, value=b0, step=0.05, label="Brows")
+                                a_skin = gr.Slider(0.0, 1.5, value=s0, step=0.05, label="Skin")
+                            a_complexion = gr.Slider(
+                                0.0, 1.0, value=c0, step=0.05, label="Borrow their complexion",
+                                info="0 keeps your own skin tone; 1 takes the look's "
+                                     "foundation and lighting too.")
+                            a_reset = gr.Button("Reset to the original look", size="sm")
+
+            # --- Create a look -------------------------------------------------------------
+            with gr.Tab("Create a look", id="create"):
+                with gr.Column(elem_classes="card"):
+                    gr.HTML(_step("✦", "Turn a photo into a look",
+                                  "One photo of anyone wearing makeup you like — a friend, a "
+                                  "magazine page, a screenshot. It becomes a look you can try on."))
+                    if not engine_ok:
+                        gr.Markdown(f"**Not available here:** {engine_why}", elem_classes="hint")
                     with gr.Row():
-                        a_lips = gr.Slider(0.0, 1.5, value=l0, step=0.05, label="Lips")
-                        a_eyes = gr.Slider(0.0, 1.5, value=e0, step=0.05, label="Eyes")
-                        a_brows = gr.Slider(0.0, 1.5, value=b0, step=0.05, label="Brows")
-                        a_skin = gr.Slider(0.0, 1.5, value=s0, step=0.05, label="Skin")
-                    a_comp = gr.Radio(
-                        ["delta", "plain"], value="delta", label="Composite",
-                        info="delta keeps the target's own skin grain; plain paints over it.",
-                    )
+                        p_with = gr.Image(label="1 · Photo with makeup", type="filepath",
+                                          height=300)
+                        p_preview = gr.Image(label="The face we'll borrow the look from",
+                                             height=300, visible=False)
+                    photo_rows = _sample_rows([
+                        ["002386_makeup_03.jpg", "rose-satin"],
+                        ["003125_makeup_02.jpg", "warm-nude"],
+                        ["003417_makeup_05.jpg", "deep-plum"],
+                    ])
+                    p_name = gr.Textbox(label="2 · Name your look", placeholder="e.g. Sunday brunch")
+                    if photo_rows:
+                        gr.Examples(photo_rows, inputs=[p_with, p_name],
+                                    label="Or try it with a sample photo", examples_per_page=3)
+                    p_btn = gr.Button("Create look", variant="primary", size="lg",
+                                      interactive=engine_ok, elem_classes="go")
+                    p_status = gr.Markdown(elem_classes="status")
+                    p_go = gr.Button("Try it on →", variant="primary", size="lg", visible=False,
+                                     elem_classes="go")
 
-                a_btn = gr.Button("Apply look", variant="primary", size="lg", elem_classes="go")
-                a_side = gr.ImageSlider(
-                    label="Before / after — drag the handle", visible=False,
-                    type="numpy", slider_position=50, height=460,
-                )
-                a_file = gr.DownloadButton("Download result", size="lg", visible=False,
-                                           elem_classes="go")
-
-            # --- Step 2: make a look --------------------------------------------------------
-            with gr.Tab("Make a look"):
-                gr.HTML(_step("02", "Extract a look from photos",
-                              "Two photos of the <em>same person</em> — one wearing makeup, one "
-                              "bare. The difference between them, in UV space, becomes a "
-                              "reusable layer."))
-                with gr.Row():
-                    p_with = gr.Image(label="With makeup", type="filepath", height=280)
-                    p_bare = gr.Image(label="Bare — same person", type="filepath", height=280)
-                pair_rows = _sample_rows([
-                    ["002386_makeup_03.jpg", "002386_bare.jpg", "rose-satin"],
-                    ["003125_makeup_02.jpg", "003125_bare.jpg", "warm-nude"],
-                    ["003417_makeup_05.jpg", "003417_bare.jpg", "deep-plum"],
-                ])
-                with gr.Row():
-                    p_name = gr.Textbox(label="Name this look", placeholder="e.g. smoky-red")
-                    p_sym = gr.Slider(0.0, 1.0, value=0.5, step=0.05,
-                                      label="Shadow suppression",
-                                      info="Mirrors the UV texture to cancel lighting that "
-                                           "falls on one side of the face.")
-                if pair_rows:
-                    gr.Examples(pair_rows, inputs=[p_with, p_bare, p_name],
-                                label="Or start with a sample pair", examples_per_page=3)
-                p_btn = gr.Button("Extract look", variant="primary", size="lg",
-                                  elem_classes="go")
-                p_status = gr.Markdown()
-                p_preview = gr.Image(label="Extracted layer — checkerboard shows what's "
-                                           "transparent", height=320, visible=False)
-
-                with gr.Accordion("Only have one photo? (needs a CUDA GPU)", open=False):
-                    gpu_ok, gpu_why = _single_photo_available()
-                    if gpu_ok:
-                        note = ("SSAT removes the makeup to synthesize a bare face, then the same "
-                                "pair pipeline runs.")
-                    else:
-                        note = (f"**Unavailable here:** {gpu_why} Use two photos above — that "
-                                "path runs on CPU.")
-                    gr.Markdown(note, elem_classes="note")
-                    with gr.Row():
-                        s_with = gr.Image(label="With makeup", type="filepath", height=260)
-                        s_ref = gr.Image(label="Bare reference — optional", type="filepath",
-                                         height=260)
-                    with gr.Row():
-                        s_name = gr.Textbox(label="Name this look",
-                                            placeholder="e.g. stolen-look")
-                        s_sym = gr.Slider(0.0, 1.0, value=0.5, step=0.05,
-                                          label="Shadow suppression")
-                    s_btn = gr.Button("Extract look on GPU", variant="primary",
-                                      interactive=gpu_ok, elem_classes="go")
-                    s_status = gr.Markdown()
-                    with gr.Row():
-                        s_pseudo = gr.Image(label="Synthesized bare face", height=280,
-                                            visible=False)
-                        s_preview = gr.Image(label="Extracted layer", height=280, visible=False)
-
-            # --- Step 3: the library --------------------------------------------------------
-            with gr.Tab("Your looks"):
-                gr.HTML(_step("03", "Keep, export, or clear out",
-                              "Every saved look lives here as an RGBA layer plus its blend "
-                              "recipe. Export one to reuse it outside this demo."
-                              if initial else
-                              "No looks saved yet. Extract one in <em>Make a look</em> — it "
-                              "shows up here and in <em>Try a look</em>."))
-                l_gallery = gr.Gallery(value=_gallery_items(), label="Saved looks",
-                                       columns=4, height=280, object_fit="cover")
-                with gr.Row():
-                    l_pick = gr.Dropdown(choices=initial, label="Selected look", value=first,
-                                         scale=3)
-                    l_exp = gr.Button("Export .zip", scale=1)
-                    l_refresh = gr.Button("Refresh", scale=1)
-                    l_del = gr.Button("Delete", variant="stop", scale=1)
-                l_status = gr.Markdown()
-                l_file = gr.File(label="Exported look", visible=False)
+            # --- My looks ------------------------------------------------------------------
+            with gr.Tab("My looks", id="library"):
+                with gr.Column(elem_classes="card"):
+                    gr.HTML(_step("♡", "Your looks", "Tap a look to try it on, download it, "
+                                                     "or remove it."))
+                    l_gallery = gr.Gallery(value=_gallery()["value"], show_label=False, columns=5,
+                                           height="auto", object_fit="cover", allow_preview=False,
+                                           buttons=[], elem_classes="looks",
+                                           elem_id="library-gallery")
+                    with gr.Column(visible=False) as l_actions:
+                        l_title = gr.Markdown()
+                        with gr.Row():
+                            l_try = gr.Button("Try it on", variant="primary", elem_classes="go")
+                            l_exp = gr.Button("Download (.zip)")
+                            l_del = gr.Button("Delete", variant="stop")
+                        l_file = gr.File(show_label=False, visible=False)
+                        with gr.Row(visible=False) as l_confirm:
+                            l_confirm_msg = gr.Markdown()
+                            l_cancel = gr.Button("Keep it", size="sm")
+                            l_yes = gr.Button("Delete", variant="stop", size="sm")
 
         gr.Markdown(
-            "Pretrained models only — nothing is trained here. Sample faces: "
-            "[FFHQ-Makeup](https://huggingface.co/datasets/cyberagent/FFHQ-Makeup) (CC BY-NC-SA) · "
-            "[source](https://github.com/Edward9292/ai-makeup-transfer)",
-            elem_classes="note",
+            "Sample faces from [FFHQ-Makeup](https://huggingface.co/datasets/cyberagent/FFHQ-Makeup) "
+            "(CC BY-NC-SA) · Photos are processed only to make your result · "
+            "[Source code](https://github.com/Edward9292/ai-makeup-transfer)",
+            elem_classes="foot",
         )
 
         # --- wiring (all components exist now) ----------------------------------------------
-        _look_outputs = [a_lips, a_eyes, a_brows, a_skin, a_swatch]
+        sliders = [a_lips, a_eyes, a_brows, a_skin, a_complexion]
+        panel = [*sliders, a_swatch]
+        try_in = [look, a_target, *sliders]
+        try_out = [a_empty, a_side, a_file, a_status]
 
-        a_gallery.select(do_pick_from_gallery, None, a_look)
-        a_look.change(_look_panel, a_look, _look_outputs)
-        a_btn.click(do_apply, [a_look, a_target, a_lips, a_eyes, a_brows, a_skin, a_comp],
-                    [a_side, a_file], scroll_to_output=True)
+        a_gallery.select(do_select_look, None, [look, *panel]).then(do_try, try_in, try_out)
+        a_target.change(do_try, try_in, try_out)
+        for s in sliders:
+            s.release(do_try, try_in, try_out)
+        a_reset.click(_look_panel, look, panel).then(do_try, try_in, try_out)
 
-        p_btn.click(do_extract_pair, [p_with, p_bare, p_name, p_sym],
-                    [p_preview, p_status, a_look, l_pick, a_gallery, l_gallery])
-        s_btn.click(do_extract_single, [s_with, s_ref, s_name, s_sym],
-                    [s_pseudo, s_preview, s_status, a_look, l_pick, a_gallery, l_gallery])
+        created = [look, a_gallery, l_gallery]
+        p_btn.click(do_create, [p_with, p_name], [p_preview, p_status, p_go, *created])
 
-        l_del.click(do_delete, l_pick, [a_look, l_pick, a_gallery, l_gallery, l_status])
-        l_exp.click(do_export, l_pick, l_file)
-        l_refresh.click(do_refresh, None, [a_look, l_pick, a_gallery, l_gallery])
+        go_out = [tabs, look, a_gallery, *panel]
+        p_go.click(do_go_try, look, go_out).then(do_try, try_in, try_out)
+        l_try.click(do_go_try, lib_pick, go_out).then(do_try, try_in, try_out)
+
+        l_gallery.select(do_select_library, None,
+                         [lib_pick, l_actions, l_title, l_file, l_confirm])
+        l_exp.click(do_export, lib_pick, l_file)
+        l_del.click(do_ask_delete, lib_pick, l_confirm_msg).then(
+            lambda: gr.update(visible=True), None, l_confirm)
+        l_cancel.click(lambda: gr.update(visible=False), None, l_confirm)
+        l_yes.click(do_delete, [lib_pick, look],
+                    [lib_pick, l_actions, l_confirm, l_file, look, a_gallery, l_gallery])
+
+        demo.load(do_reload, look, [a_gallery, l_gallery])
 
     return demo
 
 
 def main() -> None:
-    build_demo().launch()
+    build_demo().launch(**LAUNCH_KWARGS)
 
 
 if __name__ == "__main__":

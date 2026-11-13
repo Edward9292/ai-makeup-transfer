@@ -20,7 +20,7 @@ const body = Karla({
 export const metadata: Metadata = {
   title: "Makeup Transfer — one look, any face",
   description:
-    "Lift a makeup look off a photo, save it as a transparent layer, and wear it on any face — matched to that person's own skin.",
+    "Borrow the makeup from any photo and wear it on any face — your own skin, lighting and complexion stay yours.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
