@@ -217,6 +217,7 @@ def apply_look(
     composite: str = "delta",
     occlusion: bool = True,
     complexion: float | None = None,
+    match_skin: float | None = None,
     backend: str = "csd-mt",
     steps: int | None = None,
     guidance: float | None = None,
@@ -228,7 +229,8 @@ def apply_look(
 
     Engine looks (``store.has_reference``) go through ``engine.transfer_makeup``; ``complexion``
     (0..1, how much of the reference's skin tone to take) applies to them only and defaults to
-    the look's own setting. ``backend`` picks the network for engine looks — ``"csd-mt"`` (fast)
+    the look's own setting; ``match_skin`` (0..1) carries the face's resulting tone shift onto
+    the neck, ears and other exposed skin (default: all of it). ``backend`` picks the network for engine looks — ``"csd-mt"`` (fast)
     or ``"diffusion"`` (Stable-Makeup; ``steps`` / ``guidance`` / ``strength`` / ``seed`` / ``progress`` are its
     sampling options). The parameters below describe the legacy UV-layer path.
 
@@ -245,7 +247,7 @@ def apply_look(
     store = store or LookStore()
     meta = store.load_meta(look_name)
     if (reference := store.load_reference(look_name)) is not None:
-        from .engine import DEFAULT_COMPLEXION, transfer_makeup
+        from .engine import DEFAULT_COMPLEXION, DEFAULT_MATCH_SKIN, transfer_makeup
 
         bp = meta.blend_params or {}
         region_strengths = {k: float(v.get("strength", 1.0))
@@ -253,12 +255,16 @@ def apply_look(
         region_strengths.update(strengths or {})
         if complexion is None:
             complexion = float(bp.get("complexion", DEFAULT_COMPLEXION))
+        if match_skin is None:
+            match_skin = DEFAULT_MATCH_SKIN
         res = transfer_makeup(target_image, reference, strengths=region_strengths,
-                              complexion=complexion, occlusion=occlusion, backend=backend,
+                              complexion=complexion, match_skin=match_skin,
+                              occlusion=occlusion, backend=backend,
                               steps=steps, guidance=guidance, strength=strength, seed=seed,
                               progress=progress)
         debug = {"target": res.target, "backend": res.backend, "net_in": res.net_in, "net_out": res.net_out,
-                 "reference": res.reference_crop, "mask": res.mask, "crop": res.crop}
+                 "reference": res.reference_crop, "mask": res.mask, "crop": res.crop,
+                 "body_mask": res.body_mask}
         return res.image, debug
 
     layer = store.load_layer(look_name)
@@ -328,6 +334,9 @@ def _main() -> None:
     ap.add_argument("--seed", type=int, default=0, help="diffusion: noise seed")
     ap.add_argument("--complexion", type=float, default=None,
                     help="engine looks: 0..1 share of the reference's skin tone to take")
+    ap.add_argument("--match-skin", type=float, default=None,
+                    help="engine looks: 0..1, carry the face's tone shift onto the neck and "
+                         "other exposed skin (default 1; 0 = face only)")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -336,7 +345,8 @@ def _main() -> None:
     result, debug = apply_look(
         args.look, args.target, strengths=_parse_strengths(args.strength),
         uv_size=args.size, composite=args.composite, occlusion=not args.no_occlusion,
-        complexion=args.complexion, backend=args.backend, steps=args.steps,
+        complexion=args.complexion, match_skin=args.match_skin, backend=args.backend,
+        steps=args.steps,
         guidance=args.guidance, strength=args.denoise, seed=args.seed,
     )
 

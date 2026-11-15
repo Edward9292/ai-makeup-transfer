@@ -111,6 +111,10 @@ python -m makeup_transfer.engine data/ffhq_makeup/003417_bare.jpg data/ffhq_make
 python -m makeup_transfer.apply ffhq-002386-03 data/ffhq_makeup/003417_bare.jpg --backend diffusion
 ```
 
+Whatever skin-tone shift lands on the face is also carried onto the ears, neck and other
+exposed skin (`--match-skin`, 0..1, on by default), so the face does not end up a different
+colour from the body it sits on. `--match-skin 0` edits the face only.
+
 ### Legacy UV-layer pipeline
 
 `extract.py` / `uv_unwrap.py` / `priors.py` / `removal.py` are the previous pair-difference

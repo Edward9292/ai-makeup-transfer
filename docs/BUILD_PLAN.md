@@ -397,6 +397,13 @@ TARGET ─► preprocess ─► 3D fit → UV ─► [Apply NN: warp + blend + r
     delta's L and its uniform a/b cast are scaled to `keep` (default 0.4) in Lab, local chroma
     kept except a cool (−b) shift, which is scaled too — blush/bronzer are warm, grey-blue on
     skin never is; (3) the neck is excluded from edits outright.
+    *Superseded (2026-11-14):* leaving the neck alone made the face a different colour from
+    the body whenever any complexion did transfer (worst with the diffusion engine, which
+    relights the face). Now `match_body_skin` measures the tone shift that landed on bare face
+    skin (Lab: L gain + a/b offset, medians so blush stays local), and applies it to ears /
+    neck (BiSeNet, inside the crop) and the rest of the exposed skin (selfie segmenter, whole
+    photo) — a smooth local field near the face, the global figure farther out. `match_skin`
+    0..1, default 1.
   - **Product change.** A look is now a stored **reference face** (`looks/<name>/reference.png`);
     "Create a look" needs **one photo of anyone** — no same-person pair, no GPU. The app's
     SSAT single-photo panel is gone (the whole flow is single-photo now); legacy `layer.png`

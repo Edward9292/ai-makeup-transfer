@@ -93,12 +93,13 @@ def test_face_crop_is_square_and_inside_the_image():
 @needs_weights
 @needs_data
 def test_transfer_changes_lips_and_leaves_background_alone():
-    res = engine.transfer_makeup(TARGET, REFERENCE)
+    res = engine.transfer_makeup(TARGET, REFERENCE, match_skin=0.0)
     assert res.image.shape == res.target.shape
     ys, xs = res.crop.slice()
     outside = np.ones(res.target.shape[:2], bool)
     outside[ys, xs] = False
     assert np.array_equal(res.image[outside], res.target[outside])
+    assert res.body_mask is None
     diff = np.abs(res.image.astype(int) - res.target.astype(int)).mean(axis=2)
     assert diff[ys, xs].mean() > 1.0                       # something was painted
     assert res.net_out.shape == (engine.NET_SIZE, engine.NET_SIZE, 3)
@@ -152,3 +153,64 @@ def test_border_fade_is_zero_at_the_edge_and_one_inside():
     assert f.shape == (200, 200)
     assert f[0, 100] < 0.1 and f[100, 0] < 0.1 and f[199, 199] < 0.1
     assert f[100, 100] == 1.0 and f[20, 20] == 1.0
+
+
+# --- skin-tone matching beyond the face ----------------------------------------------------
+def _toned(parse: np.ndarray, bgr=(120, 150, 200)) -> np.ndarray:
+    img = np.zeros(parse.shape + (3,), np.uint8)
+    img[parse != engine._BG] = bgr
+    return img
+
+
+def test_complexion_shift_reads_the_overall_change_and_ignores_local_makeup():
+    p = _parse_fixture()
+    before = _toned(p)
+    full = np.ones(p.shape, np.float32)
+    assert engine.complexion_shift(before, before.astype(np.float32), p, full) is None
+
+    after = before.astype(np.float32) * 1.15                     # an even lightening
+    gain, da, db = engine.complexion_shift(before, after, p, full)
+    assert 1.05 < gain < 1.2
+    blush = before.astype(np.float32)
+    blush[55:65, 44:52, 2] += 60.0                              # one red patch on a cheek
+    assert engine.complexion_shift(before, blush, p, full) is None
+
+
+def test_match_body_skin_follows_the_mask_and_the_amount():
+    img = np.full((40, 60, 3), (120, 150, 200), np.uint8)
+    mask = np.zeros((40, 60), np.float32)
+    mask[10:30, 20:50] = 1.0
+    d = engine.match_body_skin(img, (1.1, 3.0, -2.0), mask)
+    assert d.shape == img.shape
+    assert np.abs(d[:10]).max() == 0 and np.abs(d[:, :20]).max() == 0   # untouched off the mask
+    assert d[20, 30].mean() > 5.0                                      # lighter inside
+    half = engine.match_body_skin(img, (1.1, 3.0, -2.0), mask, 0.5)
+    assert np.allclose(half, 0.5 * d, atol=1e-3)
+    assert np.abs(engine.match_body_skin(img, (1.1, 3.0, -2.0), np.zeros_like(mask))).max() == 0
+
+
+def test_complexion_field_is_local_near_the_face_and_global_at_the_crop_border():
+    p = _parse_fixture(256, 256)
+    before = _toned(p)
+    after = before.astype(np.float32)
+    after[:, 128:] *= 1.2                                       # only the right half lightened
+    full = np.ones(p.shape, np.float32)
+    f = engine.complexion_field(before, after, p, full, (1.1, 0.0, 0.0))
+    assert f.shape == (256, 256, 3)
+    assert f[128, 190, 0] > f[128, 66, 0] + 0.1                 # follows the nearby face skin
+    assert abs(f[0, 0, 0] - 1.1) < 1e-3                         # the global shift at the border
+
+
+@needs_weights
+@needs_data
+def test_matching_carries_the_face_tone_onto_the_neck_only_on_skin():
+    off = engine.transfer_makeup(TARGET, REFERENCE, complexion=1.0, match_skin=0.0)
+    on = engine.transfer_makeup(TARGET, REFERENCE, complexion=1.0, match_skin=1.0)
+    assert on.body_mask is not None and on.body_mask.shape == on.target.shape[:2]
+    change = np.abs(on.image.astype(int) - off.image.astype(int)).mean(axis=2)
+    assert change[on.body_mask > 0.9].mean() > 0.5              # the neck / ears moved
+    assert change[on.body_mask < 0.01].max() <= 1               # nothing else did
+    ys, xs = on.crop.slice()
+    parse = engine.get_parser().parse(cv2.cvtColor(on.target[ys, xs], cv2.COLOR_BGR2RGB))
+    hair = parse == engine._HAIR
+    assert change[ys, xs][hair].mean() < 0.3

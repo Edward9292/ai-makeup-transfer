@@ -39,7 +39,8 @@ import gradio as gr
 
 from .apply import DEFAULT_REGION_PARAMS, apply_look, region_weights_uv
 from .diffusion import DEFAULT_GUIDANCE, DEFAULT_STRENGTH
-from .engine import DEFAULT_COMPLEXION, backend_available, create_look, reference_swatches
+from .engine import (DEFAULT_COMPLEXION, DEFAULT_MATCH_SKIN, backend_available, create_look,
+                     reference_swatches)
 from .engine import available as engine_available
 from .engine import missing_weights_message
 from .extract import _checker_preview
@@ -267,7 +268,7 @@ def do_select_look(evt: gr.SelectData):
 
 def do_try(look, target_path, lips, eyes, brows, skin, complexion,
            quality=_INSTANT, guidance=DEFAULT_GUIDANCE, strength=DEFAULT_STRENGTH,
-           progress=gr.Progress()):
+           match_skin=DEFAULT_MATCH_SKIN, progress=gr.Progress()):
     """Apply as soon as both halves are there; until then, say what's missing."""
     if not look or not target_path:
         hint = ("Choose a look in step 1." if not look else
@@ -289,6 +290,7 @@ def do_try(look, target_path, lips, eyes, brows, skin, complexion,
             progress(0.0, desc="Warming up the diffusion model (first run takes longer)")
         result_bgr, debug = apply_look(
             look, target_path, strengths=strengths, store=store, complexion=float(complexion),
+            match_skin=float(match_skin),
             backend="diffusion" if diffusion else "csd-mt",
             guidance=float(guidance) if diffusion else None,
             strength=float(strength) if diffusion else None,
@@ -636,6 +638,12 @@ def build_demo() -> gr.Blocks:
                                 0.0, 1.0, value=c0, step=0.05, label="Borrow their complexion",
                                 info="0 keeps your own skin tone; 1 takes the look's "
                                      "foundation and lighting too.")
+                            a_match = gr.Slider(
+                                0.0, 1.0, value=DEFAULT_MATCH_SKIN, step=0.05,
+                                label="Match neck and body",
+                                info="Carries the face's new skin tone onto your ears, neck "
+                                     "and other bare skin so the face doesn't stand apart. "
+                                     "0 touches the face only.")
                             a_guidance = gr.Slider(
                                 1.0, 2.5, value=DEFAULT_GUIDANCE, step=0.05,
                                 label="Makeup weight (Realistic only)", visible=diffusion_ok,
@@ -707,15 +715,16 @@ def build_demo() -> gr.Blocks:
         # --- wiring (all components exist now) ----------------------------------------------
         sliders = [a_lips, a_eyes, a_brows, a_skin, a_complexion]
         panel = [*sliders, a_swatch]
-        try_in = [look, a_target, *sliders, a_quality, a_guidance, a_strength]
+        try_in = [look, a_target, *sliders, a_quality, a_guidance, a_strength, a_match]
         try_out = [a_empty, a_side, a_file, a_status]
 
         a_gallery.select(do_select_look, None, [look, *panel]).then(do_try, try_in, try_out)
         a_target.change(do_try, try_in, try_out)
-        for s in (*sliders, a_guidance, a_strength):
+        for s in (*sliders, a_guidance, a_strength, a_match):
             s.release(do_try, try_in, try_out)
         a_quality.change(do_try, try_in, try_out)
-        a_reset.click(_look_panel, look, panel).then(do_try, try_in, try_out)
+        a_reset.click(_look_panel, look, panel).then(
+            lambda: DEFAULT_MATCH_SKIN, None, a_match).then(do_try, try_in, try_out)
 
         created = [look, a_gallery, l_gallery]
         p_btn.click(do_create, [p_with, p_name], [p_preview, p_status, p_go, *created])

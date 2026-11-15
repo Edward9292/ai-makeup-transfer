@@ -341,10 +341,11 @@ def region_weights(parse: np.ndarray, strengths: dict[str, float]) -> np.ndarray
 
 
 def edit_mask(parse: np.ndarray) -> np.ndarray:
-    """Where the delta may land: face skin + makeup regions, feathered; not hair, ears, neck,
-    the eyes' interior (iris/sclera), the mouth opening, or background. The neck is left alone on
-    purpose: foundation stops at the jaw in real life, and a lightened neck above an untouched
-    chest is the classic "mask" tell."""
+    """Where the makeup delta may land: face skin + makeup regions, feathered; not hair, ears,
+    neck, the eyes' interior (iris/sclera), the mouth opening, or background. The network's
+    pixels stop at the jaw; the *tone* they leave on the face is carried onto the ears, neck and
+    the rest of the exposed skin by ``match_body_skin``, so the face does not sit on the body
+    like a mask."""
     h, w = parse.shape
     px = max(min(h, w) // 64, 1)
     keep = np.isin(parse, [_SKIN, _NOSE, _L_BROW, _R_BROW, _U_LIP, _L_LIP]).astype(np.uint8)
@@ -366,6 +367,7 @@ class TransferResult:
     reference_crop: np.ndarray        # RGB reference crop, same size
     mask: np.ndarray                  # (crop.size, crop.size) float composite gate
     backend: str = "csd-mt"
+    body_mask: np.ndarray | None = None   # (H, W) float: where the face's tone shift was carried
 
 
 def _reference_crop_rgb(
@@ -494,6 +496,165 @@ def _border_fade(size: int, frac: float = 0.06) -> np.ndarray:
     return np.minimum.outer(edge, edge)
 
 
+# --- skin-tone matching beyond the face ----------------------------------------------------------
+def _lab(bgr: np.ndarray) -> np.ndarray:
+    """BGR (uint8 or float 0..255) -> float32 Lab (L 0..100). OpenCV's float path: fast enough
+    for a full-resolution phone photo, where skimage takes seconds."""
+    return cv2.cvtColor(np.clip(bgr, 0, 255).astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
+
+
+def _bgr(lab: np.ndarray) -> np.ndarray:
+    return np.clip(cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_Lab2BGR), 0.0, 1.0) * 255.0
+
+
+def _bare_skin(parse: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    """Bool mask of face skin that carries no feature makeup (not lips / brows / the eye band)
+    and where the composite landed at full weight — where a tone change can be read off."""
+    h, w = parse.shape
+    px = max(min(h, w) // 64, 1)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (12 * px + 1, 12 * px + 1))
+    eyes = cv2.dilate(np.isin(parse, [_L_EYE, _R_EYE]).astype(np.uint8), k).astype(bool)
+    return np.isin(parse, [_SKIN, _NOSE]) & ~eyes & (weight > 0.9)
+
+
+_FIELD_SIZE = 256   # the shift field is smooth; it is computed small and upsampled
+
+
+def complexion_field(
+    before_bgr: np.ndarray, after_bgr: np.ndarray, parse: np.ndarray, weight: np.ndarray,
+    shift: tuple[float, float, float],
+) -> np.ndarray:
+    """``complexion_shift`` as a smooth per-pixel map over the face crop: ``(S, S, 3)`` of
+    ``(L gain, da, db)``.
+
+    A network rarely changes the face evenly — diffusion in particular relights it, lifting
+    the shaded jaw far more than the lit forehead — so one global figure leaves the neck
+    under-corrected exactly where it meets the face. Here each skin pixel off the face takes
+    the change of the face skin *nearest* to it (a normalised blur, which extrapolates past
+    the face's edge): ears follow the cheeks, the neck follows the jaw. Away from the face,
+    and toward the crop border where the rest of the photo takes over, it settles to the
+    global ``shift``.
+    """
+    size = parse.shape[0]
+    n = _FIELD_SIZE
+    small = lambda a, i=cv2.INTER_AREA: cv2.resize(a, (n, n), interpolation=i)  # noqa: E731
+    w = small(_bare_skin(parse, weight).astype(np.float32))
+    lab0 = small(_lab(before_bgr))
+    lab1 = small(_lab(after_bgr))
+    sigma = n / 10.0
+    blur = lambda a: cv2.GaussianBlur(a, (0, 0), sigma)  # noqa: E731
+
+    conf = blur(w)
+    eps = 0.03                       # confidence at which local and global weigh the same
+    g0, da0, db0 = shift
+    l0, l1 = blur(lab0[..., 0] * w), blur(lab1[..., 0] * w)
+    gain = np.clip(l1 / np.maximum(l0, 1e-3), 0.6, 1.6)
+    d_ab = blur((lab1[..., 1:] - lab0[..., 1:]) * w[..., None]) / np.maximum(conf, 1e-6)[..., None]
+    local = np.dstack([gain, d_ab])
+    local[conf < 1e-4] = (g0, da0, db0)
+    k = (conf / (conf + eps))[..., None] * _border_fade(n, 0.15)[..., None]
+    field = k * local + (1.0 - k) * np.array([g0, da0, db0], np.float32)
+    return cv2.resize(field.astype(np.float32), (size, size), interpolation=cv2.INTER_LINEAR)
+
+
+def complexion_shift(
+    before_bgr: np.ndarray, after_bgr: np.ndarray, parse: np.ndarray, weight: np.ndarray,
+) -> tuple[float, float, float] | None:
+    """The overall skin-tone change the composite left on the face: ``(L gain, da, db)`` in Lab.
+
+    Measured on bare face skin (not lips / brows / the eye band) where the composite landed at
+    full weight. Medians, so a blush patch or a contour stripe — local makeup, which must stay
+    on the face — does not leak into the figure; what is left is foundation, exposure and
+    colour cast. ``None`` when there is too little skin to measure or nothing changed.
+    """
+    sel = _bare_skin(parse, weight)
+    if sel.sum() < 64:
+        return None
+    lab0, lab1 = _lab(before_bgr)[sel], _lab(after_bgr)[sel]
+    lit = lab0[:, 0] > 5.0
+    if lit.sum() < 64:
+        return None
+    gain = float(np.median(lab1[lit, 0] / lab0[lit, 0]))
+    da, db = (float(v) for v in np.median(lab1[:, 1:] - lab0[:, 1:], axis=0))
+    if abs(gain - 1.0) < 0.004 and abs(da) < 0.25 and abs(db) < 0.25:
+        return None
+    return gain, da, db
+
+
+def body_skin_mask(
+    face: FaceData, crop: Crop, parse: np.ndarray, face_cover: np.ndarray,
+) -> np.ndarray:
+    """(H, W) float weight of exposed skin the face composite did *not* paint: ears, neck,
+    chest, shoulders, arms, hands — and the rim of the face itself where the makeup gate fades.
+
+    Two sources, each used where it is best: inside the face crop BiSeNet's labels (sharp
+    around the jaw, ears and hairline; they also keep eyes, teeth, hair and jewellery out),
+    everywhere else MediaPipe's selfie segmenter (the only one that sees the whole photo).
+    ``face_cover`` is where the makeup delta landed, so the two edits cross-fade at the jaw
+    instead of stacking. Without the segmenter weight only the crop is covered, faded at its
+    border.
+    """
+    h, w = face.image.shape[:2]
+    ys, xs = crop.slice()
+    px = max(crop.size // 64, 1)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+    keep = np.isin(parse, [_SKIN, _NOSE, _L_EAR, _R_EAR, _NECK]).astype(np.float32)
+    avoid = np.isin(parse, [_L_EYE, _R_EYE, _MOUTH, _U_LIP, _L_LIP, _L_BROW, _R_BROW])
+    avoid = cv2.dilate(avoid.astype(np.uint8), k).astype(np.float32)
+    # Feathered *inward* (0 at the label boundary, 1 a few pixels inside): a plain blur would
+    # spill the tone shift onto the hairline, the collar and the background next to the ears.
+    inward = np.clip(2.0 * cv2.GaussianBlur(keep, (0, 0), 0.75 * px) - 1.0, 0.0, 1.0)
+    local = np.minimum(inward, 1.0 - cv2.GaussianBlur(avoid, (0, 0), 1.0 * px))
+    local = np.clip(local, 0.0, 1.0)
+    fade = _border_fade(crop.size)
+
+    mask = np.zeros((h, w), np.float32)
+    seen = face.skin_visibility
+    if seen is None:
+        mask[ys, xs] = local * fade
+    else:
+        mask[:] = seen
+        mask[ys, xs] = fade * local + (1.0 - fade) * seen[ys, xs]
+    mask[ys, xs] *= 1.0 - np.clip(face_cover, 0.0, 1.0)
+    return mask
+
+
+def match_body_skin(
+    image_bgr: np.ndarray, shift: tuple[float, float, float], mask: np.ndarray,
+    amount: float = 1.0, *, crop: Crop | None = None, field: np.ndarray | None = None,
+) -> np.ndarray:
+    """Apply the face's tone shift to ``image_bgr`` where ``mask`` says skin: ``field`` (from
+    ``complexion_field``) inside ``crop``, the global ``shift`` everywhere else.
+
+    Lightness moves by a *gain*, so the neck's own shading — the shadow under the chin, the
+    collarbones — keeps its contrast; colour moves by an offset. Returns the float32 BGR delta
+    to add to the photo (zero outside the mask's bounding box)."""
+    out = np.zeros(image_bgr.shape, np.float32)
+    weight = mask * float(amount)
+    rows, cols = np.where(weight.max(axis=1) > 1e-3)[0], np.where(weight.max(axis=0) > 1e-3)[0]
+    if not len(rows) or not len(cols):
+        return out
+    by, bx = box = (slice(rows[0], rows[-1] + 1), slice(cols[0], cols[-1] + 1))
+    amounts = np.empty((by.stop - by.start, bx.stop - bx.start, 3), np.float32)
+    amounts[:] = shift
+    if crop is not None and field is not None:
+        # The part of the crop that falls inside the mask's bounding box.
+        y0, y1 = max(crop.y0, by.start), min(crop.y0 + crop.size, by.stop)
+        x0, x1 = max(crop.x0, bx.start), min(crop.x0 + crop.size, bx.stop)
+        if y0 < y1 and x0 < x1:
+            amounts[y0 - by.start:y1 - by.start, x0 - bx.start:x1 - bx.start] = \
+                field[y0 - crop.y0:y1 - crop.y0, x0 - crop.x0:x1 - crop.x0]
+    lab = _lab(image_bgr[box])
+    moved = lab.copy()
+    moved[..., 0] = np.clip(moved[..., 0] * amounts[..., 0], 0.0, 100.0)
+    moved[..., 1:] += amounts[..., 1:]
+    # Both sides go through the same Lab round trip, so its rounding error cancels out of the
+    # difference instead of being added to the photo as noise.
+    out[box] = weight[box][..., None] * (_bgr(moved) - _bgr(lab))
+    return out
+
+
+DEFAULT_MATCH_SKIN = 1.0   # carry the face's whole tone shift onto the rest of the exposed skin
 DEFAULT_COMPLEXION = 0.4   # keep 40% of the reference's overall skin-tone shift by default
 
 # Network outputs keyed by (backend, inputs, sampling options). The composite is cheap and the
@@ -514,6 +675,7 @@ def transfer_makeup(
     *,
     strengths: dict[str, float] | None = None,
     complexion: float = DEFAULT_COMPLEXION,
+    match_skin: float = DEFAULT_MATCH_SKIN,
     occlusion: bool = True,
     backend: str = "csd-mt",
     steps: int | None = None,
@@ -529,7 +691,9 @@ def transfer_makeup(
     ``steps`` / ``guidance`` / ``strength`` / ``seed`` / ``progress`` apply to it only). ``strengths`` scales
     the makeup per region (``DEFAULT_STRENGTHS`` keys); values above 1 exaggerate, 0 removes.
     ``complexion`` (0..1) is how much of the reference's *overall* skin-tone shift to keep (see
-    ``_damp_complexion``). ``occlusion`` gates the result by the segmenter's skin mask so hair
+    ``_damp_complexion``). ``match_skin`` (0..1) carries whatever tone shift did land on the
+    face onto the ears, neck and other exposed skin, so the face keeps matching the body; 0
+    edits the face only. ``occlusion`` gates the result by the segmenter's skin mask so hair
     and hands crossing the face stay clean.
     """
     engine = engine or get_backend(backend)
@@ -580,16 +744,28 @@ def transfer_makeup(
     delta = cv2.cvtColor(delta, cv2.COLOR_RGB2BGR)
     delta = _damp_complexion(crop_bgr, delta, parse_full, complexion)
 
-    gate = edit_mask(parse_full) * region_weights(parse_full, strengths) * _border_fade(crop.size)
+    cover = edit_mask(parse_full) * _border_fade(crop.size)
     if occlusion and (skin := face.skin_visibility) is not None:
-        gate = gate * skin[ys, xs]
+        cover = cover * skin[ys, xs]
+    gate = cover * region_weights(parse_full, strengths)
 
-    out = face.image.copy()
     region = crop_bgr.astype(np.float32) + gate[..., None] * delta
-    out[ys, xs] = np.clip(region, 0, 255).astype(np.uint8)
+    result = face.image.astype(np.float32)
+    result[ys, xs] = region
+
+    # The face now carries some of the look's complexion; the skin around it does not. Measure
+    # what landed and extend it, so the jaw is not a tone seam.
+    body_mask = None
+    if match_skin > 0 and (shift := complexion_shift(crop_bgr, region, parse_full, cover)):
+        body_mask = body_skin_mask(face, crop, parse_full, cover)
+        field = complexion_field(crop_bgr, region, parse_full, cover, shift)
+        result += match_body_skin(face.image, shift, body_mask, min(float(match_skin), 1.0),
+                                  crop=crop, field=field)
+
+    out = np.clip(result + 0.5, 0, 255).astype(np.uint8)
     return TransferResult(image=out, target=face.image, crop=crop, net_in=net_in,
                           net_out=net_out, reference_crop=ref_rgb, mask=gate,
-                          backend=engine.name)
+                          backend=engine.name, body_mask=body_mask)
 
 
 # --- looks ------------------------------------------------------------------------------------
@@ -647,6 +823,8 @@ def _main() -> None:
                     help="per-region strength, e.g. --strength lips=1.2 (repeatable)")
     ap.add_argument("--complexion", type=float, default=DEFAULT_COMPLEXION,
                     help="0..1: how much of the reference's overall skin-tone shift to keep")
+    ap.add_argument("--match-skin", type=float, default=DEFAULT_MATCH_SKIN,
+                    help="0..1: carry the face's tone shift onto the neck / exposed skin (0 = off)")
     ap.add_argument("--no-occlusion", action="store_true")
     ap.add_argument("--backend", default="csd-mt", choices=BACKENDS,
                     help="csd-mt = fast GAN (CPU); diffusion = Stable-Makeup on SD 1.5")
@@ -666,7 +844,8 @@ def _main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     res = transfer_makeup(args.target, args.reference, strengths=strengths,
-                          complexion=args.complexion, occlusion=not args.no_occlusion,
+                          complexion=args.complexion, match_skin=args.match_skin,
+                          occlusion=not args.no_occlusion,
                           backend=args.backend, steps=args.steps, guidance=args.guidance,
                           strength=args.denoise, seed=args.seed,
                           progress=lambda i, n: print(f"\r  step {i}/{n}", end="", flush=True))
